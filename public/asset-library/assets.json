@@ -1,0 +1,32 @@
+[
+  {
+    "id": "asset_1777310125972_00hean",
+    "name": "Socket cap screw.ply",
+    "assetType": "pointcloud",
+    "fileUrl": "/asset-published/asset_1777310125972_00hean/output.ply",
+    "fileType": "ply",
+    "thumbnailUrl": null,
+    "sourceNode": "pointCloud",
+    "createdAt": "2026-04-27T17:15:25.972Z"
+  },
+  {
+    "id": "asset_1777316684167_9yvgt2",
+    "name": "GLB Processing_2026-04-27-19-04-44",
+    "assetType": "model",
+    "fileUrl": "/asset-published/asset_1777316684167_9yvgt2/merged.glb",
+    "fileType": "glb",
+    "thumbnailUrl": null,
+    "sourceNode": "modelGeneration",
+    "createdAt": "2026-04-27T19:04:44.167Z"
+  },
+  {
+    "id": "asset_1777316838641_0pr0d5",
+    "name": "Rotation preview video",
+    "assetType": "render-video",
+    "fileUrl": "/asset-published/asset_1777316838641_0pr0d5/merged_rotate_360.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": null,
+    "sourceNode": "videoPreview",
+    "createdAt": "2026-04-27T19:07:18.641Z"
+  }
+]

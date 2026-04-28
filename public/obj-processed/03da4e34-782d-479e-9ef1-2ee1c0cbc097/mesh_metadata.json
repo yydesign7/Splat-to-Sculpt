@@ -1,0 +1,56 @@
+{
+  "model_info": {
+    "name": "mesh",
+    "file_type": "obj",
+    "vertex_count": 4424,
+    "face_count": 8705,
+    "has_uv": false
+  },
+  "scale_metadata": {
+    "scale_factor": 1.0,
+    "unit": "meter",
+    "bounding_box_size": [
+      34.949313163757324,
+      27.16781997680664,
+      31.843841552734375
+    ]
+  },
+  "orientation_metadata": {
+    "forward_axis": "Z",
+    "up_axis": "Y",
+    "rotation_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "material_metadata": {
+    "has_texture": false,
+    "texture_paths": {}
+  },
+  "uv_metadata": {
+    "uv_index": 0,
+    "uv_dimensions": null
+  }
+}

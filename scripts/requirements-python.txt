@@ -1,0 +1,7 @@
+# Server-side Python used by merge_glbs.py, rotation video, etc.
+# Upgrade to latest:  pip3 install -Ur scripts/requirements-python.txt
+# PyOpenGL>=3.1.10 is applied after this file in install-deps-async.sh (pyrender may pin 3.1.0).
+trimesh
+numpy
+pyrender
+opencv-python-headless
