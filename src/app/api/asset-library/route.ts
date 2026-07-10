@@ -5,7 +5,7 @@ import { publishUrlToPublicIfEphemeral } from '@/lib/publish-ephemeral-to-public
 
 const ASSETS_FILE = path.join(process.cwd(), 'public', 'asset-library', 'assets.json');
 
-export type AssetType = 'video' | 'pointcloud' | 'model' | 'render-video';
+export type AssetType = 'video' | 'pointcloud' | 'splat' | 'model' | 'render-video';
 
 export interface AssetEntry {
   id: string;
@@ -51,7 +51,7 @@ async function unlinkAssetFilesOnDisk(entry: AssetEntry): Promise<void> {
 /**
  * GET /api/asset-library
  * Returns all asset entries sorted by createdAt descending (newest first).
- * Optional query param: ?assetType=video|pointcloud|model|render-video
+ * Optional query param: ?assetType=video|pointcloud|splat|model|render-video
  */
 export async function GET(request: NextRequest) {
   try {
@@ -76,7 +76,7 @@ export async function GET(request: NextRequest) {
  * Body:
  * {
  *   name: string,
- *   assetType: 'video' | 'pointcloud' | 'model' | 'render-video',
+ *   assetType: 'video' | 'pointcloud' | 'splat' | 'model' | 'render-video',
  *   fileUrl: string,
  *   fileType: string,
  *   thumbnailUrl?: string | null,

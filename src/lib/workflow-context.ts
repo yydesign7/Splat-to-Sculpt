@@ -1,7 +1,6 @@
 'use client';
 
 import { createContext, useContext, useCallback } from 'react';
-import { workflowApiFetch } from '@/lib/workflow-api-fetch';
 
 export interface WorkflowContextValue {
   /** Whether the workflow is currently in "run" mode — nodes should auto-trigger when inputs are ready */
@@ -31,7 +30,7 @@ export function useWorkflow() {
 /** Stable apiFetch bound to current session — for hooks that need [apiFetch] deps */
 export function useWorkflowApiFetch(): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
   const { apiFetch } = useWorkflow();
-  return useCallback(apiFetch, [apiFetch]);
+  return useCallback((input: RequestInfo | URL, init?: RequestInit) => apiFetch(input, init), [apiFetch]);
 }
 
 export { WorkflowContext };

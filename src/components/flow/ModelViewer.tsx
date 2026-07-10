@@ -70,6 +70,30 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
   const mainLightRef = useRef<THREE.DirectionalLight | null>(null);
   const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
 
+  const disposeThree = useCallback(() => {
+    cancelAnimationFrame(frameIdRef.current);
+    frameIdRef.current = 0;
+    if (modelRef.current) {
+      disposeObject3D(modelRef.current);
+      modelRef.current = null;
+    }
+    if (controlsRef.current) {
+      controlsRef.current.dispose();
+      controlsRef.current = null;
+    }
+    if (rendererRef.current) {
+      rendererRef.current.dispose();
+      rendererRef.current.domElement.parentElement?.removeChild(rendererRef.current.domElement);
+      rendererRef.current = null;
+    }
+    sceneRef.current = null;
+    cameraRef.current = null;
+    ambientLightRef.current = null;
+    mainLightRef.current = null;
+    fillLightRef.current = null;
+    initDoneRef.current = false;
+  }, []);
+
   // Initialize Three.js scene
   const initThree = useCallback(() => {
     const container = containerRef.current;
@@ -125,8 +149,9 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
 
   // Effect 1: Initialize Three.js once
   useEffect(() => {
+    if (!modelUrl) return;
     initThree();
-  }, [initThree]);
+  }, [initThree, modelUrl]);
 
   // Effect: Apply lightParams to Three.js lights in real-time
   useEffect(() => {
@@ -181,12 +206,8 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
   // Effect 3: Load model when url/type changes
   useEffect(() => {
     if (!modelUrl || !modelType) {
-      // Remove existing model
-      if (modelRef.current && sceneRef.current) {
-        sceneRef.current.remove(modelRef.current);
-        disposeObject3D(modelRef.current);
-        modelRef.current = null;
-      }
+      disposeThree();
+      setStatus('ready');
       return;
     }
 
@@ -386,32 +407,12 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
         onError
       );
     }
-  }, [modelUrl, modelType, initThree]);
+  }, [modelUrl, modelType, initThree, disposeThree]);
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      cancelAnimationFrame(frameIdRef.current);
-      if (modelRef.current) {
-        disposeObject3D(modelRef.current);
-        modelRef.current = null;
-      }
-      if (controlsRef.current) {
-        controlsRef.current.dispose();
-        controlsRef.current = null;
-      }
-      if (rendererRef.current) {
-        rendererRef.current.dispose();
-        if (rendererRef.current.domElement.parentElement) {
-          rendererRef.current.domElement.parentElement.removeChild(rendererRef.current.domElement);
-        }
-        rendererRef.current = null;
-      }
-      sceneRef.current = null;
-      cameraRef.current = null;
-      initDoneRef.current = false;
-    };
-  }, []);
+    return disposeThree;
+  }, [disposeThree]);
 
   return (
     <div

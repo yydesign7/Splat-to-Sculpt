@@ -7,6 +7,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as THREE from 'three';
+import type { MaterialParams } from './custom-nodes';
 
 /* ---------- Props ---------- */
 interface InteractiveModelViewerProps {
@@ -24,6 +25,10 @@ interface InteractiveModelViewerProps {
   processingText?: string;
   /** Light parameters for real-time preview */
   lightParams?: import('./custom-nodes').LightParams;
+  /** Material parameters for immediate selected-layer preview. */
+  previewMaterialParams?: MaterialParams | null;
+  /** Layer that should receive previewMaterialParams; null applies to all meshes. */
+  previewMaterialLayer?: string | null;
   /** Metadata-driven layer names from the workflow (takes priority over vertex color detection) */
   metadataLayerNames?: string[];
   /** Fired after this `modelUrl` has been fully added to the scene (bounding box OK, status → ready). */
@@ -153,6 +158,34 @@ function restoreMaterial(mat: THREE.MeshStandardMaterial) {
   }
 }
 
+function setRestorableMaterialState(mat: THREE.MeshStandardMaterial) {
+  originalMaterialProps.set(mat, {
+    emissive: mat.emissive.clone(),
+    emissiveIntensity: mat.emissiveIntensity,
+    opacity: mat.opacity,
+    transparent: mat.transparent,
+  });
+}
+
+function applyPreviewMaterial(mat: THREE.MeshStandardMaterial, params: MaterialParams) {
+  if (params.base_color_modified) {
+    mat.color.setRGB(params.base_color[0], params.base_color[1], params.base_color[2]);
+  }
+  mat.metalness = params.metallic;
+  mat.roughness = params.roughness;
+  mat.emissive.setRGB(params.emissive_color[0], params.emissive_color[1], params.emissive_color[2]);
+  mat.emissiveIntensity = params.emissive_strength;
+  mat.opacity = params.alpha;
+  mat.transparent = params.alpha < 0.999;
+  mat.needsUpdate = true;
+  setRestorableMaterialState(mat);
+}
+
+function standardMaterials(material: THREE.Material | THREE.Material[]): THREE.MeshStandardMaterial[] {
+  const materials = Array.isArray(material) ? material : [material];
+  return materials.filter((mat): mat is THREE.MeshStandardMaterial => mat instanceof THREE.MeshStandardMaterial);
+}
+
 /* ---------- Interactive Model Viewer ---------- */
 export default function InteractiveModelViewer({
   modelUrl,
@@ -164,6 +197,8 @@ export default function InteractiveModelViewer({
   processing = false,
   processingText = 'Processing...',
   lightParams,
+  previewMaterialParams,
+  previewMaterialLayer,
   metadataLayerNames,
   onSuccessfulModelLoad,
 }: InteractiveModelViewerProps) {
@@ -205,11 +240,21 @@ export default function InteractiveModelViewer({
   const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
   const mainLightRef = useRef<THREE.DirectionalLight | null>(null);
   const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const previewMaterialParamsRef = useRef<MaterialParams | null>(previewMaterialParams ?? null);
+  const previewMaterialLayerRef = useRef<string | null>(previewMaterialLayer ?? null);
 
   // Track highlight layer in ref for use in animation loop
   useEffect(() => {
     highlightLayerRef.current = highlightLayer ?? null;
   }, [highlightLayer]);
+
+  useEffect(() => {
+    previewMaterialParamsRef.current = previewMaterialParams ?? null;
+  }, [previewMaterialParams]);
+
+  useEffect(() => {
+    previewMaterialLayerRef.current = previewMaterialLayer ?? null;
+  }, [previewMaterialLayer]);
 
   // Effect: Apply lightParams to Three.js lights in real-time
   useEffect(() => {
@@ -290,35 +335,42 @@ export default function InteractiveModelViewer({
       // Apply highlight to the selected layer directly in render loop
       const model = modelRef.current;
       const targetName = highlightLayerRef.current;
+      const previewParams = previewMaterialParamsRef.current;
+      const previewLayer = previewMaterialLayerRef.current;
       const meshMap = meshToLayerMapRef.current;
       if (model) {
         model.traverse((child) => {
           if (child instanceof THREE.Mesh && child.material) {
-            const mat = child.material as THREE.MeshStandardMaterial;
-            if (!mat) return;
+            const mats = standardMaterials(child.material);
+            if (mats.length === 0) return;
 
-            saveOriginalMaterial(mat);
-
-            // Check if this mesh belongs to the highlighted layer
-            // If meshToLayerMap has an entry, use it; otherwise fall back to direct name match
             const mappedLayer = meshMap.get(child.name);
-            const isHighlighted = targetName && (mappedLayer === targetName || child.name === targetName);
+            const matchesPreviewLayer = !previewLayer || mappedLayer === previewLayer || child.name === previewLayer;
+            const isHighlighted = !!targetName && (mappedLayer === targetName || child.name === targetName);
 
-            if (isHighlighted) {
-              // Highlight this layer
-              mat.emissive.copy(HIGHLIGHT_EMISSIVE);
-              mat.emissiveIntensity = 0.5;
-              mat.opacity = 1.0;
-              mat.transparent = false;
-            } else if (targetName) {
-              // Dim other layers
-              mat.opacity = 0.3;
-              mat.transparent = true;
-              mat.emissive.set(0x000000);
-              mat.emissiveIntensity = 0;
-            } else {
-              // No highlight - restore
-              restoreMaterial(mat);
+            for (const mat of mats) {
+              if (previewParams && matchesPreviewLayer) {
+                applyPreviewMaterial(mat, previewParams);
+              } else {
+                saveOriginalMaterial(mat);
+              }
+
+              if (isHighlighted) {
+                // Highlight this layer
+                mat.emissive.copy(HIGHLIGHT_EMISSIVE);
+                mat.emissiveIntensity = 0.5;
+                mat.opacity = 1.0;
+                mat.transparent = false;
+              } else if (targetName) {
+                // Dim other layers
+                mat.opacity = 0.3;
+                mat.transparent = true;
+                mat.emissive.set(0x000000);
+                mat.emissiveIntensity = 0;
+              } else {
+                // No highlight - restore
+                restoreMaterial(mat);
+              }
             }
           }
         });

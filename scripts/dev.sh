@@ -6,6 +6,17 @@ PORT=5001
 COZE_WORKSPACE_PATH="${COZE_WORKSPACE_PATH:-$(pwd)}"
 DEPLOY_RUN_PORT=5001
 PYTHON_ENV_NAME="${PYTHON_ENV_NAME:-studio3dgs}"
+PYTHON_BIN="${PYTHON_BIN:-/Users/yuyi/miniconda3/envs/studio3dgs/bin/python3}"
+NS_TRAIN_BIN="${NS_TRAIN_BIN:-/Users/yuyi/miniconda3/envs/studio3dgs/bin/ns-train}"
+NS_EXPORT_BIN="${NS_EXPORT_BIN:-/Users/yuyi/miniconda3/envs/studio3dgs/bin/ns-export}"
+MPLCONFIGDIR="${MPLCONFIGDIR:-/private/tmp/studio3dgs-matplotlib}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-/private/tmp/studio3dgs-cache}"
+
+export PYTHON_BIN
+export NS_TRAIN_BIN
+export NS_EXPORT_BIN
+export MPLCONFIGDIR
+export XDG_CACHE_HOME
 
 
 cd "${COZE_WORKSPACE_PATH}"
@@ -22,8 +33,12 @@ fi
 # This runs async so the dev server starts immediately.
 # Logs: /app/work/logs/bypass/deps-install.log
 if [ -f "./scripts/install-deps-async.sh" ]; then
-  bash ./scripts/install-deps-async.sh &
-  echo "Background dependency installer started (PID: $!)"
+  if [ "${FORCE_INSTALL_DEPS:-0}" = "1" ] || [ ! -f "/tmp/deps-ready" ]; then
+    bash ./scripts/install-deps-async.sh &
+    echo "Background dependency installer started (PID: $!)"
+  else
+    echo "Background dependency installer skipped (/tmp/deps-ready exists). Set FORCE_INSTALL_DEPS=1 to recheck."
+  fi
 fi
 
 kill_port_if_listening() {
@@ -48,4 +63,4 @@ echo "Clearing port ${PORT} before start."
 kill_port_if_listening
 echo "Starting HTTP service on port ${PORT} for dev..."
 
-PORT=$PORT pnpm tsx watch src/server.ts
+PORT=$PORT ./node_modules/.bin/tsx watch src/server.ts

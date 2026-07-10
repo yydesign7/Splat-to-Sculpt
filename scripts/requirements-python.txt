@@ -2,6 +2,7 @@
 # Upgrade to latest:  pip3 install -Ur scripts/requirements-python.txt
 # PyOpenGL>=3.1.10 is applied after this file in install-deps-async.sh (pyrender may pin 3.1.0).
 trimesh
-numpy
+numpy<2
 pyrender
-opencv-python-headless
+opencv-python-headless==4.10.0.84
+open3d

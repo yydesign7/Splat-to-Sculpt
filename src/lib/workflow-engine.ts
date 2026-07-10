@@ -12,7 +12,8 @@ import { inferModelTypeFromUrl } from '@/lib/infer-model-type-from-url';
 const SOURCE_HANDLE_MAP: Record<string, string> = {
   'videoUpload.output': 'videoServerPath',
   'frameExtraction.output': 'frames',
-  'pointCloud.ply-output': 'plyUrl',
+  'gaussianSplat.mesh-output': 'sourcePlyUrl',
+  'gaussianSplat.splat-output': 'splatUrl',
   'material.texture-output': 'textureUrl',
   'modelOrganize.obj-output': 'outputUrl',
   'modelSurface.obj-output': 'outputModelUrl',
@@ -25,24 +26,47 @@ const SOURCE_HANDLE_MAP: Record<string, string> = {
  * allows forwarding additional fields like lightParams.
  */
 const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string, sourceNodeData?: Record<string, unknown>) => Record<string, unknown>> = {
-  'frameExtraction.input': (value) => ({ videoServerPath: value as string }),
-  'pointCloud.input': (value) => ({ framePaths: value as string[] }),
+  'frameExtraction.input': (value, sourceNodeType, sourceNodeData) => {
+    const out: Record<string, unknown> = { videoServerPath: value as string };
+    if (sourceNodeType === 'videoUpload' && typeof sourceNodeData?.targetFrameCount === 'number') {
+      out.targetFrameCount = sourceNodeData.targetFrameCount;
+    }
+    return out;
+  },
+  'gaussianSplat.input': (value) => ({ framePaths: value as string[] }),
+  'gaussianSplat.ply-input': (value, _sourceNodeType, sourceNodeData) => {
+    const result: Record<string, unknown> = { sourcePlyUrl: value as string };
+    if (sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
+      result.layerFiles = sourceNodeData.layerFiles;
+    }
+    if (sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
+      result.layerNames = sourceNodeData.layerNames;
+    }
+    return result;
+  },
   'modelGeneration.model-input': (value, sourceNodeType, sourceNodeData) => {
-    const isPly = sourceNodeType === 'pointCloud';
+    const isGaussianSplat = sourceNodeType === 'gaussianSplat' && sourceNodeData?.splatUrl === value;
+    const isPly = sourceNodeType === 'gaussianSplat' && !isGaussianSplat;
     // Infer model type from URL extension for non-PLY sources
     const url = value as string;
-    const inferredType = isPly ? 'ply' : inferModelTypeFromUrl(url) || 'obj';
-    const result: Record<string, unknown> = { modelUrl: url, inputType: inferredType as 'ply' | 'obj' | 'glb' };
+    const inferredType = isGaussianSplat ? 'splat' : isPly ? 'ply' : inferModelTypeFromUrl(url) || 'obj';
+    const result: Record<string, unknown> = { modelUrl: url, inputType: inferredType as 'ply' | 'obj' | 'glb' | 'splat' };
     // Forward lightParams from source node data if present
     if (sourceNodeData?.lightParams) {
       result.lightParams = sourceNodeData.lightParams;
     }
-    // Forward layerFiles + layerNames from point cloud node if present
+    // Forward layerFiles + layerNames from upstream PLY metadata if present
     if (isPly && sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
       result.layerFiles = sourceNodeData.layerFiles;
     }
     if (isPly && sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
       result.layerNames = sourceNodeData.layerNames;
+    }
+    if (isGaussianSplat && typeof sourceNodeData?.gaussianCount === 'number') {
+      result.gaussianCount = sourceNodeData.gaussianCount;
+    }
+    if (isGaussianSplat && typeof sourceNodeData?.computeBackend === 'string') {
+      result.computeBackend = sourceNodeData.computeBackend;
     }
     return result;
   },
@@ -50,7 +74,7 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
   'modelOrganize.obj-input': (value, _sourceNodeType, sourceNodeData) => {
     const url = value as string;
     const result: Record<string, unknown> = { modelUrl: url };
-    // Forward layerFiles + layerNames from upstream point cloud if present
+    // Forward layerFiles + layerNames from upstream model metadata if present
     if (sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
       result.layerFiles = sourceNodeData.layerFiles;
     }
@@ -64,7 +88,7 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
   },
   'modelSurface.obj-input': (value, _sourceNodeType, sourceNodeData) => {
     const result: Record<string, unknown> = { modelUrl: value as string };
-    // Forward layerFiles + layerNames from upstream point cloud if present
+    // Forward layerFiles + layerNames from upstream model metadata if present
     if (sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
       result.layerFiles = sourceNodeData.layerFiles;
     }
@@ -129,14 +153,14 @@ export function getNodeTriggerInfo(
         satisfiedInputs: hasVideo ? ['video'] : [],
       };
     }
-    case 'pointCloud': {
-      // Point cloud is auto-triggered by frame extraction via data push (status set to 'processing')
-      const isActive = d.status === 'processing' || d.status === 'done';
+    case 'gaussianSplat': {
+      const hasFrames = Array.isArray(d.framePaths) && d.framePaths.length > 0;
+      const hasPly = !!d.sourcePlyUrl;
       return {
-        canTrigger: isActive,
-        reason: isActive ? 'Frame data received' : 'Waiting for frame input',
-        requiredInputs: ['frames'],
-        satisfiedInputs: isActive ? ['frames'] : [],
+        canTrigger: hasFrames || hasPly,
+        reason: hasFrames ? 'Frame data ready' : hasPly ? 'Point cloud data ready' : 'Waiting for frames or point cloud input',
+        requiredInputs: ['frames or point cloud'],
+        satisfiedInputs: hasFrames ? ['frames'] : hasPly ? ['point cloud'] : [],
       };
     }
     case 'material': {
@@ -238,7 +262,8 @@ export function getNodeTriggerInfo(
  */
 export function computeDownstreamPushes(
   sourceNode: Node,
-  edges: Edge[]
+  edges: Edge[],
+  allNodes: Node[] = [],
 ): Array<{ targetNodeId: string; updates: Record<string, unknown> }> {
   const results: Array<{ targetNodeId: string; updates: Record<string, unknown> }> = [];
   const outgoingEdges = edges.filter((e) => e.source === sourceNode.id);
@@ -251,20 +276,26 @@ export function computeDownstreamPushes(
     const outputValue = sourceNode.data[outputField];
     if (outputValue === undefined || outputValue === null) continue;
 
-    // Find the target node to get its type
-    // We need the target node type to look up the target handle map
-    const targetKey = edge.targetHandle || '';
-    // We construct the key as "targetNodeType.targetHandleId"
-    // But we don't have the target node here — we'll use a simpler approach:
-    // try all matching target handle map entries
     let updates: Record<string, unknown> | null = null;
+    const targetNode = allNodes.find((node) => node.id === edge.target);
+    const exactTargetKey = targetNode?.type && edge.targetHandle ? `${targetNode.type}.${edge.targetHandle}` : '';
+
+    if (exactTargetKey && TARGET_HANDLE_MAP[exactTargetKey]) {
+      updates = TARGET_HANDLE_MAP[exactTargetKey](
+        outputValue,
+        sourceNode.type || '',
+        sourceNode.data as Record<string, unknown>,
+      );
+    }
 
     // Try matching by handle id across all known target types
-    for (const [mapKey, mapFn] of Object.entries(TARGET_HANDLE_MAP)) {
-      const handleId = mapKey.split('.').slice(1).join('.');
-      if (handleId === edge.targetHandle) {
-        updates = mapFn(outputValue, sourceNode.type || '', sourceNode.data as Record<string, unknown>);
-        break;
+    if (!updates) {
+      for (const [mapKey, mapFn] of Object.entries(TARGET_HANDLE_MAP)) {
+        const handleId = mapKey.split('.').slice(1).join('.');
+        if (handleId === edge.targetHandle) {
+          updates = mapFn(outputValue, sourceNode.type || '', sourceNode.data as Record<string, unknown>);
+          break;
+        }
       }
     }
 
@@ -287,8 +318,8 @@ export function isNodeDone(node: Node | undefined): boolean {
       return d.uploadStatus === 'done';
     case 'frameExtraction':
       return d.status === 'done';
-    case 'pointCloud':
-      return d.status === 'done';
+    case 'gaussianSplat':
+      return d.status === 'done' && !!d.splatUrl;
     case 'material':
       return d.status === 'done';
     case 'modelOrganize':
@@ -315,7 +346,7 @@ export function isNodeProcessing(node: Node | undefined): boolean {
       return d.uploadStatus === 'uploading';
     case 'frameExtraction':
       return d.status === 'extracting';
-    case 'pointCloud':
+    case 'gaussianSplat':
       return d.status === 'processing';
     case 'material':
       return d.status === 'processing';
@@ -342,7 +373,7 @@ export function isNodeError(node: Node | undefined): boolean {
     case 'videoUpload':
       return d.uploadStatus === 'error';
     case 'frameExtraction':
-    case 'pointCloud':
+    case 'gaussianSplat':
     case 'material':
       return d.status === 'error';
     case 'modelOrganize':

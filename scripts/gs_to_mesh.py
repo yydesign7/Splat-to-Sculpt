@@ -15,6 +15,8 @@ import argparse
 import os
 import sys
 import json
+import struct
+import math
 
 # Slightly lower depth: fewer spurious high-frequency sheets on thin parts (e.g. chair legs).
 POISSON_DEPTH = 8
@@ -22,6 +24,131 @@ POISSON_DEPTH = 8
 DENSITY_PERCENTILE = 7.0
 # A bit coarser voxels: smoother input, less noise for Poisson to overfit.
 VOXEL_FRAC = 0.0065
+C0 = 0.28209479177387814
+
+
+def _parse_ply_header(input_path: str):
+    with open(input_path, "rb") as f:
+        header_lines = []
+        while True:
+            line = f.readline()
+            if not line:
+                raise RuntimeError("Invalid PLY: missing end_header")
+            decoded = line.decode("utf-8", errors="replace").strip()
+            header_lines.append(decoded)
+            if decoded == "end_header":
+                break
+        payload_offset = f.tell()
+
+    if not header_lines or header_lines[0] != "ply":
+        raise RuntimeError("Input is not a PLY file")
+
+    fmt = "ascii"
+    vertex_count = 0
+    properties = []
+    in_vertex = False
+    for line in header_lines:
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "format":
+            fmt = parts[1]
+        elif parts[:2] == ["element", "vertex"]:
+            vertex_count = int(parts[2])
+            in_vertex = True
+        elif parts[0] == "element" and parts[1] != "vertex":
+            in_vertex = False
+        elif in_vertex and parts[0] == "property" and len(parts) >= 3:
+            properties.append((parts[1], parts[2]))
+
+    return fmt, vertex_count, properties, payload_offset
+
+
+def _is_gaussian_splat_ply(properties) -> bool:
+    names = {name for _typ, name in properties}
+    return {"x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "rot_0"}.issubset(names)
+
+
+def _read_gaussian_splat_ply(input_path: str) -> o3d.geometry.PointCloud:
+    fmt, vertex_count, properties, payload_offset = _parse_ply_header(input_path)
+    if vertex_count <= 0:
+        raise RuntimeError("PLY has no vertices")
+
+    prop_names = [name for _typ, name in properties]
+    ix, iy, iz = prop_names.index("x"), prop_names.index("y"), prop_names.index("z")
+    ir, ig, ib = prop_names.index("f_dc_0"), prop_names.index("f_dc_1"), prop_names.index("f_dc_2")
+    iopacity = prop_names.index("opacity") if "opacity" in prop_names else None
+
+    points = np.zeros((vertex_count, 3), dtype=np.float64)
+    colors = np.zeros((vertex_count, 3), dtype=np.float64)
+    keep = np.ones(vertex_count, dtype=bool)
+
+    def row_to_arrays(i: int, vals):
+        points[i] = [float(vals[ix]), float(vals[iy]), float(vals[iz])]
+        rgb = np.array([float(vals[ir]), float(vals[ig]), float(vals[ib])], dtype=np.float64) * C0 + 0.5
+        colors[i] = np.clip(rgb, 0.0, 1.0)
+        if iopacity is not None:
+            opacity = 1.0 / (1.0 + math.exp(-float(vals[iopacity])))
+            keep[i] = opacity > 0.01
+
+    with open(input_path, "rb") as f:
+        f.seek(payload_offset)
+        if fmt == "ascii":
+            for i in range(vertex_count):
+                vals = f.readline().decode("utf-8", errors="replace").strip().split()
+                if len(vals) < len(properties):
+                    raise RuntimeError(f"Invalid ASCII PLY vertex row {i}")
+                row_to_arrays(i, vals)
+        elif fmt == "binary_little_endian":
+            type_map = {
+                "char": ("b", 1),
+                "uchar": ("B", 1),
+                "int8": ("b", 1),
+                "uint8": ("B", 1),
+                "short": ("h", 2),
+                "ushort": ("H", 2),
+                "int16": ("h", 2),
+                "uint16": ("H", 2),
+                "int": ("i", 4),
+                "uint": ("I", 4),
+                "int32": ("i", 4),
+                "uint32": ("I", 4),
+                "float": ("f", 4),
+                "float32": ("f", 4),
+                "double": ("d", 8),
+                "float64": ("d", 8),
+            }
+            fmt_chars = []
+            for typ, _name in properties:
+                if typ not in type_map:
+                    raise RuntimeError(f"Unsupported PLY property type: {typ}")
+                fmt_chars.append(type_map[typ][0])
+            row_fmt = "<" + "".join(fmt_chars)
+            row_size = struct.calcsize(row_fmt)
+            for i in range(vertex_count):
+                row = f.read(row_size)
+                if len(row) != row_size:
+                    raise RuntimeError(f"Unexpected EOF in binary PLY row {i}")
+                row_to_arrays(i, struct.unpack(row_fmt, row))
+        else:
+            raise RuntimeError(f"Unsupported PLY format: {fmt}")
+
+    points = points[keep]
+    colors = colors[keep]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    return pcd
+
+
+def read_input_point_cloud(input_path: str) -> tuple[o3d.geometry.PointCloud, str]:
+    fmt, vertex_count, properties, _payload_offset = _parse_ply_header(input_path)
+    if vertex_count <= 0:
+        pcd = o3d.geometry.PointCloud()
+        return pcd, "empty"
+    if _is_gaussian_splat_ply(properties):
+        return _read_gaussian_splat_ply(input_path), "splat"
+    return o3d.io.read_point_cloud(input_path), "pointcloud"
 
 
 def estimate_poisson_normals(pcd: o3d.geometry.PointCloud, voxel_size: float, scale: float):
@@ -84,8 +211,8 @@ def _remove_tiny_island_meshes(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.
 def run_pipeline(input_path: str, output_dir: str, output_format: str):
     os.makedirs(output_dir, exist_ok=True)
 
-    # Read point cloud
-    pcd = o3d.io.read_point_cloud(input_path)
+    # Read point cloud or Gaussian Splat PLY centers
+    pcd, input_representation = read_input_point_cloud(input_path)
     if len(pcd.points) == 0:
         print(json.dumps({"status": "error", "error": "PLY file has no point data"}), flush=True)
         return
@@ -226,6 +353,7 @@ def run_pipeline(input_path: str, output_dir: str, output_format: str):
         "pointCount": point_count,
         "faceCount": face_count,
         "vertexCount": len(mesh.vertices),
+        "inputRepresentation": input_representation,
     }
     print(json.dumps(result), flush=True)
 

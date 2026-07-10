@@ -33,7 +33,14 @@ export async function POST(request: NextRequest) {
     const baseName = path.basename(file.name, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
     const safeName = `${baseName}${ext}`;
 
-    const subDir = fileType === 'texture' ? 'textures' : 'uploads';
+    const subDir =
+      fileType === 'texture'
+        ? 'textures'
+        : fileType === 'pointcloud/splat-source'
+          ? 'splat-sources'
+          : fileType === 'pointcloud'
+            ? 'pointclouds'
+            : 'uploads';
     const sessionRoot = await ensureSessionRoot(sessionId);
     const destDir = path.join(sessionRoot, subDir, jobId);
     await mkdir(destDir, { recursive: true });

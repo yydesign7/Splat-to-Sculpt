@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile, writeFile, mkdir, unlink } from 'fs/promises';
+import { readFile, writeFile, mkdir } from 'fs/promises';
 import path from 'path';
+import { DEFAULT_WORKFLOW_ID, createDefaultWorkflowEntry } from '@/lib/default-workflow';
 
 const WORKFLOWS_FILE = path.join(process.cwd(), 'public', 'workflow-library', 'workflows.json');
 
@@ -11,12 +12,14 @@ export interface WorkflowEntry {
   edges: unknown[];
   createdAt: string;
   updatedAt: string;
+  readonly?: boolean;
+  preset?: boolean;
 }
 
 async function readWorkflows(): Promise<WorkflowEntry[]> {
   try {
     const data = await readFile(WORKFLOWS_FILE, 'utf-8');
-    return JSON.parse(data) as WorkflowEntry[];
+    return (JSON.parse(data) as WorkflowEntry[]).filter((entry) => entry.id !== DEFAULT_WORKFLOW_ID);
   } catch {
     return [];
   }
@@ -35,7 +38,7 @@ export async function GET() {
   try {
     const entries = await readWorkflows();
     entries.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-    return NextResponse.json({ success: true, entries });
+    return NextResponse.json({ success: true, entries: [createDefaultWorkflowEntry(), ...entries] });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Failed to read workflow list';
     return NextResponse.json({ error: message }, { status: 500 });
@@ -108,6 +111,10 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: 'Missing required parameters (id, name)' }, { status: 400 });
     }
 
+    if (id === DEFAULT_WORKFLOW_ID) {
+      return NextResponse.json({ error: 'Default workflow preset cannot be renamed' }, { status: 403 });
+    }
+
     const entries = await readWorkflows();
     const index = entries.findIndex((e) => e.id === id);
     if (index === -1) {
@@ -143,6 +150,10 @@ export async function DELETE(request: NextRequest) {
 
     if (!targetId) {
       return NextResponse.json({ error: 'Missing workflow ID or all=true' }, { status: 400 });
+    }
+
+    if (targetId === DEFAULT_WORKFLOW_ID) {
+      return NextResponse.json({ error: 'Default workflow preset cannot be deleted' }, { status: 403 });
     }
 
     const entries = await readWorkflows();

@@ -1,12 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { Handle, Position, useReactFlow, type NodeProps, type Node } from '@xyflow/react';
-import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Layers, Video, Film, Cloud, Palette, Box, Check, RotateCcw, Scissors, StickyNote } from 'lucide-react';
-import { getNodeConfig, NODE_WIDTH, VIDEO_PREVIEW_NODE_WIDTH } from '@/lib/node-config';
+import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Layers, Video, Film, Palette, Box, Check, RotateCcw, StickyNote, Download, Sparkles, Orbit, Brush, Eraser } from 'lucide-react';
+import { getNodeConfig, getNodeVisualTheme, NODE_WIDTH, VIDEO_PREVIEW_NODE_WIDTH } from '@/lib/node-config';
 import { mergeLayerGlbsInBrowser, isGltfLikeUrl, type LayerGlbEntry } from '@/lib/browser-merge-glb';
 import { inferModelTypeFromUrl as inferModelType } from '@/lib/infer-model-type-from-url';
-import { ingestPlyToPointCloudNode } from '@/lib/ingest-ply-to-point-cloud-node';
 import { useWorkflow } from '@/lib/workflow-context';
 import dynamic from 'next/dynamic';
 
@@ -29,7 +28,23 @@ async function recordModelHistory(params: {
   }
 }
 
-type AssetType = 'video' | 'pointcloud' | 'model' | 'render-video';
+type AssetType = 'video' | 'pointcloud' | 'splat' | 'model' | 'render-video';
+type GaussianDeviceType = 'cuda' | 'mps' | 'cpu';
+type GaussianTrainingMode = 'auto' | 'train';
+
+function normalizeGaussianDeviceType(value: unknown): GaussianDeviceType | null {
+  return value === 'cuda' || value === 'mps' || value === 'cpu' ? value : null;
+}
+
+function normalizeGaussianTrainingMode(value: unknown): GaussianTrainingMode {
+  return value === 'train' ? 'train' : 'auto';
+}
+
+function getGaussianTargetPlyLabel(deviceType: GaussianDeviceType | null, trainingMode: GaussianTrainingMode) {
+  if (deviceType === 'cuda' || trainingMode === 'train') return 'trained 3DGS PLY';
+  if (deviceType === 'mps' || deviceType === 'cpu') return 'initializer splat PLY';
+  return '3DGS PLY';
+}
 
 async function recordAsset(params: {
   name: string;
@@ -48,6 +63,56 @@ async function recordAsset(params: {
   } catch {
     // Silently fail — asset recording is non-critical
   }
+}
+
+async function createAssetThumbnail(params: {
+  fileUrl: string;
+  ephemeralSessionId: string | null;
+}): Promise<string | null> {
+  if (!params.ephemeralSessionId) return null;
+  try {
+    const res = await fetch('/api/generate-asset-thumbnail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const data = await res.json();
+    return data.success && typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : null;
+  } catch {
+    return null;
+  }
+}
+
+function drawCroppedImageToCanvas(
+  image: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+) {
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx || sourceWidth <= 0 || sourceHeight <= 0) return null;
+
+  const sourceRatio = sourceWidth / sourceHeight;
+  const targetRatio = targetWidth / targetHeight;
+  let sx = 0;
+  let sy = 0;
+  let sw = sourceWidth;
+  let sh = sourceHeight;
+
+  if (sourceRatio > targetRatio) {
+    sw = sourceHeight * targetRatio;
+    sx = (sourceWidth - sw) / 2;
+  } else {
+    sh = sourceWidth / targetRatio;
+    sy = (sourceHeight - sh) / 2;
+  }
+
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+  return canvas;
 }
 
 /** Poll /api/mesh-status until a generate-mesh task finishes */
@@ -71,24 +136,152 @@ async function waitForMeshTask(
   throw new Error('Mesh task timeout');
 }
 
-const ModelViewer = dynamic(() => import('./ModelViewer'), { ssr: false });
-const PLYViewer = dynamic(() => import('./PLYViewer'), { ssr: false });
-const InteractiveModelViewer = dynamic(() => import('./InteractiveModelViewer'), { ssr: false });
-import { LightControls } from './LightControls';
-
-/* ========== Pre-computed point cloud dots (avoids Math.random in render) ========== */
-function seededRandom(seed: number): number {
-  const x = Math.sin(seed * 9301 + 49297) * 233280;
-  return x - Math.floor(x);
+/** Poll /api/gaussian-status until a generate-gaussian-splat task finishes */
+async function waitForGaussianTask(
+  taskId: string,
+  fetchImpl: typeof fetch = fetch,
+  onProgress?: (task: {
+    progress?: string;
+    progressStep?: number;
+    deviceType?: GaussianDeviceType;
+    computeBackend?: string;
+    trainingMode?: GaussianTrainingMode;
+    targetPlyType?: string;
+    trueTrainingAvailable?: boolean;
+    trueTrainingUnavailableReason?: string;
+    currentTrainingIteration?: number;
+    maxTrainingIterations?: number;
+  }) => void,
+): Promise<{ splatUrl: string; sourcePlyUrl: string; gaussianCount: number; format: '3dgs-ply'; layerFiles?: string[]; layerNames?: string[]; deviceType?: GaussianDeviceType; computeBackend?: string; trainingMode?: GaussianTrainingMode; targetPlyType?: string }> {
+  for (let attempt = 0; attempt < 240; attempt++) {
+    const r = await fetchImpl(`/api/gaussian-status?taskId=${encodeURIComponent(taskId)}`);
+    const task = await r.json();
+    if (task.status === 'processing') {
+      onProgress?.({
+        progress: task.progress,
+        progressStep: typeof task.progressStep === 'number' ? task.progressStep : undefined,
+        deviceType: normalizeGaussianDeviceType(task.deviceType) ?? undefined,
+        computeBackend: typeof task.computeBackend === 'string' ? task.computeBackend : undefined,
+        trainingMode: normalizeGaussianTrainingMode(task.trainingMode),
+        targetPlyType: typeof task.targetPlyType === 'string' ? task.targetPlyType : undefined,
+        trueTrainingAvailable:
+          typeof task.trueTrainingAvailable === 'boolean' ? task.trueTrainingAvailable : undefined,
+        trueTrainingUnavailableReason:
+          typeof task.trueTrainingUnavailableReason === 'string' ? task.trueTrainingUnavailableReason : undefined,
+        currentTrainingIteration:
+          typeof task.currentTrainingIteration === 'number' ? task.currentTrainingIteration : undefined,
+        maxTrainingIterations:
+          typeof task.maxTrainingIterations === 'number' ? task.maxTrainingIterations : undefined,
+      });
+    }
+    if (task.status === 'done' && task.result) {
+      return {
+        ...task.result,
+        deviceType: normalizeGaussianDeviceType(task.deviceType) ?? undefined,
+        trainingMode: normalizeGaussianTrainingMode(task.trainingMode),
+        targetPlyType: typeof task.targetPlyType === 'string' ? task.targetPlyType : undefined,
+      };
+    }
+    if (task.status === 'cancelled') throw new Error('Gaussian splat generation stopped');
+    if (task.status === 'error') throw new Error(task.error || 'Gaussian splat generation failed');
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+  throw new Error('Gaussian splat task timeout');
 }
 
-const POINT_CLOUD_DOTS = Array.from({ length: 80 }, (_, i) => ({
-  cx: 10 + seededRandom(i * 3 + 1) * 100,
-  cy: 5 + seededRandom(i * 3 + 2) * 50,
-  r: 0.8 + seededRandom(i * 3 + 3) * 1.2,
-  fill: `hsl(${170 + seededRandom(i * 5 + 4) * 30}, 20%, ${40 + seededRandom(i * 5 + 5) * 20}%)`,
-  opacity: 0.5 + seededRandom(i * 5 + 6) * 0.5,
-}));
+function sanitizeLabelForFilename(label: string): string {
+  const base = (label || 'export')
+    .replace(/[/\\?%*:|"<>]/g, '_')
+    .replace(/\s+/g, '_')
+    .trim()
+    .slice(0, 80);
+  return base || 'export';
+}
+
+function previewDownloadNumericSuffix(nodeId: string): string {
+  if (/^\d+$/.test(nodeId)) return nodeId;
+  return String(Date.now());
+}
+
+function extFromPathname(url: string, fallback: string): string {
+  const fb = fallback.startsWith('.') ? fallback : `.${fallback}`;
+  try {
+    const u = new URL(url, typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+    const m = u.pathname.match(/\.([a-zA-Z0-9]+)$/);
+    if (m) return `.${m[1].toLowerCase()}`;
+  } catch {
+    /* ignore */
+  }
+  return fb;
+}
+
+function buildPreviewDownloadFilename(label: string | undefined, nodeId: string, ext: string): string {
+  const safe = sanitizeLabelForFilename(String(label ?? 'Node'));
+  const num = previewDownloadNumericSuffix(nodeId);
+  const dotExt = ext.startsWith('.') ? ext : `.${ext}`;
+  return `${safe}_${num}${dotExt}`;
+}
+
+async function downloadFromUrl(url: string, filename: string): Promise<void> {
+  if (url.startsWith('blob:')) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const blob = await res.blob();
+  const obj = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = obj;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(obj);
+}
+
+function PreviewDownloadIconButton({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) => void }) {
+  return (
+    <button
+      type="button"
+      title="Download"
+      className="nodrag nopan absolute right-1.5 bottom-1.5 z-20 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-zinc-200 transition-colors hover:bg-black/80"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick(e);
+      }}
+    >
+      <Download size={14} />
+    </button>
+  );
+}
+
+function PreviewClearIconButton({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) => void }) {
+  return (
+    <button
+      type="button"
+      title="Clear file"
+      aria-label="Clear file"
+      className="nodrag nopan absolute right-1.5 top-1.5 z-20 flex h-6 w-6 items-center justify-center rounded-md bg-black/60 text-zinc-300 transition-colors hover:bg-black/80 hover:text-white"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick(e);
+      }}
+    >
+      <X size={12} />
+    </button>
+  );
+}
+
+const ModelViewer = dynamic(() => import('./ModelViewer'), { ssr: false });
+const SplatViewer = dynamic(() => import('./SplatViewer'), { ssr: false });
+const InteractiveModelViewer = dynamic(() => import('./InteractiveModelViewer'), { ssr: false });
+import { LightControls } from './LightControls';
 
 /* ========== Shared Helpers ========== */
 
@@ -104,6 +297,8 @@ type VideoUploadNodeData = Node<{
   videoServerPath: string | null;
   uploadStatus: 'idle' | 'uploading' | 'done' | 'error';
   uploadError: string | null;
+  /** Number of frames to extract (used by downstream Frame Extraction). */
+  targetFrameCount: number;
 }>;
 
 type FrameExtractionNodeData = Node<{
@@ -117,16 +312,26 @@ type FrameExtractionNodeData = Node<{
   errorMessage: string | null;
 }>;
 
-type PointCloudNodeData = Node<{
+type GaussianSplatNodeData = Node<{
   label: string;
+  framePaths: string[];
+  sourcePlyUrl: string | null;
+  splatUrl: string | null;
+  gaussianCount: number | null;
   status: 'idle' | 'processing' | 'done' | 'error';
-  pointCount: number | null;
-  plyUrl: string | null;
   progressText: string | null;
   progressStep: number | null;
   errorMessage: string | null;
-  enableDepthFusion: boolean;
-  enableSegmentation: boolean;
+  trainingIterations: number;
+  currentTrainingIteration: number | null;
+  maxTrainingIterations: number | null;
+  activeTaskId: string | null;
+  deviceType: GaussianDeviceType | null;
+  computeBackend: string | null;
+  trainingMode: GaussianTrainingMode;
+  targetPlyType: string | null;
+  trueTrainingAvailable?: boolean | null;
+  trueTrainingUnavailableReason?: string | null;
   layerFiles: string[];
   layerNames: string[];
 }>;
@@ -165,7 +370,7 @@ type VideoPreviewNodeData = Node<{
 }>;
 
 /** Principled BSDF material parameters matching Blender's node */
-interface MaterialParams {
+export interface MaterialParams {
   base_color: [number, number, number];   // 0-1 RGB
   metallic: number;                        // 0-1
   roughness: number;                       // 0-1
@@ -289,13 +494,15 @@ type ModelGenerationNodeData = Node<{
   modelUrl: string | null;
   isFullscreen: boolean;
   outputUrl: string | null;
-  outputType: 'glb' | 'fbx' | 'obj' | 'ply' | null;
-  inputType: 'ply' | 'obj' | 'glb' | null;
+  outputType: 'glb' | 'fbx' | 'obj' | 'ply' | 'splat' | null;
+  inputType: 'ply' | 'obj' | 'glb' | 'splat' | null;
   textureUrl: string | null;
   meshStatus: 'idle' | 'processing' | 'done' | 'error';
   outputFormat: 'glb' | 'obj' | 'ply';
   errorMessage: string | null;
   faceCount: number | null;
+  gaussianCount: number | null;
+  computeBackend: string | null;
   renderUrl: string | null;
   lightParams: LightParams | null;
   layerFiles: string[];
@@ -312,14 +519,64 @@ type StickyNoteNodeData = Node<{
 const HEADER_ICONS: Record<string, React.ReactNode> = {
   videoUpload: <Video size={14} />,
   frameExtraction: <Film size={14} />,
-  pointCloud: <Cloud size={14} />,
+  gaussianSplat: <Orbit size={14} />,
   material: <Palette size={14} />,
-  modelOrganize: <Box size={14} />,
+  modelOrganize: <Eraser size={14} />,
   videoPreview: <MonitorPlay size={14} />,
-  modelSurface: <Layers size={14} />,
+  modelSurface: <Brush size={14} />,
   modelGeneration: <Box size={14} />,
   stickyNote: <StickyNote size={14} />,
 };
+
+type NodeVisualStatus = 'idle' | 'processing' | 'extracting' | 'done' | 'error';
+
+const BASE_NODE_SHADOW = '0 10px 15px -3px rgb(0 0 0 / 0.34), 0 4px 6px -4px rgb(0 0 0 / 0.34)';
+const BASE_NODE_BORDER = 'rgb(63 63 70)';
+const NODE_FRAME_CLASS_NAME = 'relative rounded-lg border bg-zinc-800 shadow-lg transition-[border-color,box-shadow] duration-200';
+
+const NODE_STATUS_STYLES: Record<NodeVisualStatus, { border: string; dot: string; shadow: string }> = {
+  idle: {
+    border: BASE_NODE_BORDER,
+    dot: '#71717a',
+    shadow: BASE_NODE_SHADOW,
+  },
+  processing: {
+    border: BASE_NODE_BORDER,
+    dot: '#eab308',
+    shadow: BASE_NODE_SHADOW,
+  },
+  extracting: {
+    border: BASE_NODE_BORDER,
+    dot: '#eab308',
+    shadow: BASE_NODE_SHADOW,
+  },
+  done: {
+    border: BASE_NODE_BORDER,
+    dot: '#22c55e',
+    shadow: BASE_NODE_SHADOW,
+  },
+  error: {
+    border: BASE_NODE_BORDER,
+    dot: '#f87171',
+    shadow: BASE_NODE_SHADOW,
+  },
+};
+
+function getNodeFrameStyle(type: string, status: NodeVisualStatus, width = NODE_WIDTH): CSSProperties {
+  const theme = getNodeVisualTheme(type);
+  const state = NODE_STATUS_STYLES[status] ?? NODE_STATUS_STYLES.idle;
+
+  return {
+    width,
+    borderColor: state.border,
+    boxShadow: state.shadow,
+    '--node-accent': theme.accent,
+    '--node-accent-soft': theme.accentSoft,
+    '--node-accent-muted': theme.accentMuted,
+    '--node-accent-text': theme.text,
+    '--node-status-dot': state.dot,
+  } as CSSProperties;
+}
 
 /* ========== Node Header ========== */
 function NodeHeader({
@@ -331,25 +588,69 @@ function NodeHeader({
 }) {
   const config = getNodeConfig(type);
   if (!config) return null;
+  const theme = getNodeVisualTheme(type);
+
+  if (type === 'stickyNote') {
+    return (
+      <div
+        className="flex items-center justify-between rounded-t-lg border-b border-amber-700/50 px-3 py-2"
+        style={{ backgroundColor: theme.accent }}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-white/20 bg-black/10 text-amber-50">
+            {HEADER_ICONS[type]}
+          </span>
+          <span className="truncate text-xs font-semibold text-amber-50">{config.label}</span>
+        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="flex h-5 w-5 items-center justify-center rounded-full text-amber-50/80 transition-colors hover:bg-white/15 hover:text-white"
+          aria-label={`Delete ${config.label}`}
+        >
+          <X size={12} />
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className="flex items-center justify-between rounded-t-lg px-3 py-2"
-      style={{ backgroundColor: config.color }}
-    >
-      <div className="flex items-center gap-2">
-        <span className="flex h-5 w-5 items-center justify-center text-white">{HEADER_ICONS[type]}</span>
-        <span className="text-xs font-semibold text-white">{config.label}</span>
+    <div className="relative flex items-center justify-between rounded-t-lg border-b border-zinc-700/80 bg-zinc-900/90 px-3 py-2">
+      <span
+        className="absolute left-0 top-0 h-full w-1 rounded-tl-lg"
+        style={{ backgroundColor: theme.accent }}
+      />
+      <div className="flex min-w-0 items-center gap-2 pl-1">
+        <span
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border"
+          style={{
+            backgroundColor: theme.accentSoft,
+            borderColor: theme.accentMuted,
+            color: theme.text,
+          }}
+        >
+          {HEADER_ICONS[type]}
+        </span>
+        <span className="truncate text-xs font-semibold text-zinc-100">{config.label}</span>
       </div>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete();
-        }}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-white/20 text-white transition-colors hover:bg-white/40"
-      >
-        <X size={12} />
-      </button>
+      <div className="flex shrink-0 items-center gap-2 pl-2">
+        <span
+          className="h-2 w-2 rounded-full"
+          style={{ backgroundColor: 'var(--node-status-dot, #71717a)' }}
+        />
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="flex h-5 w-5 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-700 hover:text-zinc-100"
+          aria-label={`Delete ${config.label}`}
+        >
+          <X size={12} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -362,11 +663,11 @@ interface PortDef {
   color: string;
 }
 
-function HandleBar({ ports }: { ports: PortDef[] }) {
+function HandleBar({ ports, children }: { ports: PortDef[]; children?: React.ReactNode }) {
   const targets = ports.filter((p) => p.type === 'target');
   const sources = ports.filter((p) => p.type === 'source');
 
-  if (targets.length === 0 && sources.length === 0) return null;
+  if (targets.length === 0 && sources.length === 0 && !children) return null;
 
   // Row height for each handle+label pair; vertical padding top+bottom
   const ROW_H = 20;
@@ -382,6 +683,11 @@ function HandleBar({ ports }: { ports: PortDef[] }) {
       className="relative flex border-b border-zinc-700 bg-zinc-900/60"
       style={{ height: barHeight }}
     >
+      {children && (
+        <div className="absolute inset-y-0 left-2.5 right-12 z-10 flex items-center">
+          {children}
+        </div>
+      )}
       {/* Absolute-positioned target handles — left edge */}
       {targets.map((p, i) => (
         <Handle
@@ -469,17 +775,18 @@ function PreviewBox({
 }
 
 /* ========== Status Badge ========== */
-function StatusBadge({ status }: { status: 'idle' | 'processing' | 'extracting' | 'done' | 'error' }) {
-  const config: Record<string, { label: string; className: string }> = {
-    idle: { label: 'Idle', className: 'bg-zinc-700 text-zinc-300' },
-    processing: { label: 'Processing', className: 'bg-yellow-900/40 text-yellow-200/70' },
-    extracting: { label: 'Extracting', className: 'bg-yellow-900/40 text-yellow-200/70' },
-    done: { label: 'Done', className: 'bg-green-900/40 text-green-200/70' },
-    error: { label: 'Error', className: 'bg-red-900/40 text-red-200/70' },
+function StatusBadge({ status }: { status: NodeVisualStatus }) {
+  const config: Record<NodeVisualStatus, { label: string; className: string; dotClassName: string }> = {
+    idle: { label: 'Idle', className: 'border-zinc-600 bg-zinc-700/50 text-zinc-300', dotClassName: 'bg-zinc-400' },
+    processing: { label: 'Processing', className: 'border-yellow-500/40 bg-yellow-500/12 text-yellow-200', dotClassName: 'bg-yellow-300' },
+    extracting: { label: 'Extracting', className: 'border-yellow-500/40 bg-yellow-500/12 text-yellow-200', dotClassName: 'bg-yellow-300' },
+    done: { label: 'Done', className: 'border-green-500/40 bg-green-500/12 text-green-200', dotClassName: 'bg-green-300' },
+    error: { label: 'Error', className: 'border-red-500/40 bg-red-500/12 text-red-200', dotClassName: 'bg-red-300' },
   };
   const c = config[status] || config.idle;
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${c.className}`}>
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${c.className}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${c.dotClassName}`} />
       {c.label}
     </span>
   );
@@ -558,6 +865,14 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
   const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(data.videoUrl);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>(data.uploadStatus || 'idle');
   const [uploadError, setUploadError] = useState<string | null>(data.uploadError);
+  const [targetFrameCount, setTargetFrameCount] = useState(data.targetFrameCount ?? 120);
+
+  useEffect(() => {
+    if (typeof data.targetFrameCount === 'number' && data.targetFrameCount !== targetFrameCount) {
+      setTargetFrameCount(data.targetFrameCount);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.targetFrameCount]);
 
   // Sync videoUrl from upstream data changes
   useEffect(() => {
@@ -574,30 +889,63 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
     setNodes((nds) => nds.filter((n) => n.id !== id));
   }, [id, setNodes]);
 
+  const handleFrameCountInput = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = parseInt(e.target.value, 10);
+      if (!isNaN(val) && val >= 1 && val <= 300) {
+        setTargetFrameCount(val);
+        setNodes((nds) => {
+          const withVideo = nds.map((n) =>
+            n.id === id ? { ...n, data: { ...n.data, targetFrameCount: val } } : n
+          );
+          const edges = getEdges();
+          const downstreamEdge = edges.find((edge) => edge.source === id);
+          if (!downstreamEdge) return withVideo;
+          return withVideo.map((n) =>
+            n.id === downstreamEdge.target && n.type === 'frameExtraction'
+              ? { ...n, data: { ...n.data, targetFrameCount: val } }
+              : n
+          );
+        });
+      }
+    },
+    [id, setNodes, getEdges]
+  );
+
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
       const videoUrl = URL.createObjectURL(file);
+      let resolveCoverThumbnail: (value: string | null) => void = () => {};
+      const coverThumbnailPromise = new Promise<string | null>((resolve) => {
+        resolveCoverThumbnail = resolve;
+      });
+      let coverSettled = false;
+      const settleCoverThumbnail = (value: string | null) => {
+        if (coverSettled) return;
+        coverSettled = true;
+        resolveCoverThumbnail(value);
+      };
 
       // Extract cover image from first frame
       const video = document.createElement('video');
       video.src = videoUrl;
       video.muted = true;
       video.playsInline = true;
+      video.addEventListener('error', () => settleCoverThumbnail(null), { once: true });
       video.addEventListener('loadeddata', () => {
         video.currentTime = 0;
       });
       video.addEventListener('seeked', () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(video, 0, 0);
-          const coverUrl = canvas.toDataURL('image/jpeg', 0.8);
+        const coverCanvas = drawCroppedImageToCanvas(video, video.videoWidth, video.videoHeight, 320, 180);
+        const thumbnailCanvas = drawCroppedImageToCanvas(video, video.videoWidth, video.videoHeight, 144, 96);
+        if (coverCanvas) {
+          const coverUrl = coverCanvas.toDataURL('image/jpeg', 0.8);
+          const thumbnailUrl = thumbnailCanvas?.toDataURL('image/jpeg', 0.72) ?? coverUrl;
           setLocalCover(coverUrl);
+          settleCoverThumbnail(thumbnailUrl);
           setNodes((nds) =>
             nds.map((n) =>
               n.id === id
@@ -605,8 +953,10 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
                 : n
             )
           );
+        } else {
+          settleCoverThumbnail(null);
         }
-      });
+      }, { once: true });
 
       // Upload video using chunked upload to bypass CDN body size limit
       setUploadStatus('uploading');
@@ -677,8 +1027,12 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
 
           return completeResult;
         })
-        .then((result) => {
+        .then(async (result) => {
           const { videoServerPath } = result;
+          const thumbnailUrl = await Promise.race([
+            coverThumbnailPromise,
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+          ]);
           setUploadStatus('done');
 
           // Record uploaded video to asset library
@@ -687,11 +1041,11 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
             assetType: 'video',
             fileUrl: videoServerPath,
             fileType: 'mp4',
-            thumbnailUrl: null,
+            thumbnailUrl,
             sourceNode: 'videoUpload',
           });
 
-          // Update this node and push videoServerPath to downstream FrameExtractionNode
+          // Update this node and push videoServerPath (+ frame count) to downstream FrameExtractionNode
           setNodes((nds) => {
             const updated = nds.map((n) =>
               n.id === id
@@ -707,6 +1061,14 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
                 : n
             );
 
+            const videoNode = updated.find((n) => n.id === id);
+            const tfcRaw =
+              videoNode?.data && typeof videoNode.data === 'object' && 'targetFrameCount' in videoNode.data
+                ? (videoNode.data as { targetFrameCount?: number }).targetFrameCount
+                : undefined;
+            const tfc =
+              typeof tfcRaw === 'number' && tfcRaw >= 1 && tfcRaw <= 300 ? tfcRaw : 120;
+
             const edges = getEdges();
             const downstreamEdge = edges.find((edge) => edge.source === id);
             if (downstreamEdge) {
@@ -718,6 +1080,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
                       data: {
                         ...n.data,
                         videoServerPath,
+                        targetFrameCount: tfc,
                       },
                     }
                   : n
@@ -742,20 +1105,92 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
     [id, data.videoName, setNodes, getEdges, apiFetch]
   );
 
+  const handleClearVideo = useCallback(() => {
+    if (uploadStatus === 'uploading') return;
+    if (localVideoUrl?.startsWith('blob:')) {
+      URL.revokeObjectURL(localVideoUrl);
+    }
+    setLocalCover(null);
+    setLocalVideoUrl(null);
+    setUploadStatus('idle');
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                videoUrl: null,
+                coverUrl: null,
+                videoName: null,
+                videoServerPath: null,
+                uploadStatus: 'idle' as const,
+                uploadError: null,
+              },
+            }
+          : n
+      )
+    );
+  }, [id, localVideoUrl, setNodes, uploadStatus]);
+
+  const hasVideoPreview = !!(localCover || localVideoUrl || data.videoServerPath);
+
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle('videoUpload', uploadStatus === 'uploading' ? 'processing' : uploadStatus)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="videoUpload" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'source', id: 'output', label: 'Video', color: '#4a6a8a' },
-      ]} />
+      ]}>
+        <div className="nodrag nopan flex items-center gap-2">
+          <span className="whitespace-nowrap text-[10px] font-medium text-zinc-400">Frame count</span>
+          <input
+            type="number"
+            min={1}
+            max={300}
+            value={targetFrameCount}
+            onChange={handleFrameCountInput}
+            className="nodrag nopan h-5 w-14 rounded border border-zinc-600 bg-zinc-950/70 px-1.5 text-center text-[11px] text-zinc-200 outline-none transition-colors focus:border-[#4a6a8a]/70"
+          />
+        </div>
+      </HandleBar>
       <div className="p-3 space-y-2">
-        <PreviewBox className="h-[140px]" placeholder="Click to upload video">
-          {localCover ? (
-            <img src={localCover} alt="Video cover" className="h-full w-full object-cover" />
-          ) : localVideoUrl ? (
-            <video src={localVideoUrl} className="h-full w-full object-contain" muted playsInline />
-          ) : null}
-        </PreviewBox>
+        <div
+          role="button"
+          tabIndex={uploadStatus === 'uploading' ? -1 : 0}
+          aria-disabled={uploadStatus === 'uploading'}
+          onClick={() => {
+            if (uploadStatus !== 'uploading') fileInputRef.current?.click();
+          }}
+          onKeyDown={(event) => {
+            if (uploadStatus === 'uploading') return;
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              fileInputRef.current?.click();
+            }
+          }}
+          className={`block w-full ${uploadStatus === 'uploading' ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+          title="Upload video"
+        >
+          <PreviewBox className="h-[140px]" placeholder="Click to upload video">
+            {localCover ? (
+              <img src={localCover} alt="Video cover" className="h-full w-full object-cover" draggable={false} />
+            ) : localVideoUrl ? (
+              <video src={localVideoUrl} className="h-full w-full object-contain" muted playsInline />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center text-zinc-600 transition-colors hover:text-zinc-500">
+                <Upload size={24} />
+              </div>
+            )}
+            {hasVideoPreview && uploadStatus !== 'uploading' && (
+              <PreviewClearIconButton onClick={handleClearVideo} />
+            )}
+          </PreviewBox>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -763,14 +1198,6 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
           className="hidden"
           onChange={handleFileChange}
         />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploadStatus === 'uploading'}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-slate-600/20 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:bg-slate-600/30 disabled:opacity-50"
-        >
-          <Upload size={12} />
-          {uploadStatus === 'uploading' ? 'Uploading...' : 'Upload Video'}
-        </button>
         {data.videoName && (
           <p className="truncate text-[10px] text-zinc-400">{data.videoName}</p>
         )}
@@ -781,9 +1208,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
           </div>
         )}
         {uploadStatus === 'done' && data.videoServerPath && (
-          <p className="text-[10px] text-[#5a8a6a]">
-            Video uploaded, set frame count in Frame Extraction node
-          </p>
+          <p className="text-[10px] text-[#5a8a6a]">Video uploaded — run workflow or extract frames downstream.</p>
         )}
         {uploadStatus === 'error' && uploadError && (
           <p className="text-[10px] text-[#8a5a5a]">
@@ -800,122 +1225,27 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
    ==================================================================== */
 export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeData>) {
   const { setNodes, getEdges, getNodes } = useReactFlow();
-  const { workflowRunning, apiFetch, ephemeralSessionId } = useWorkflow();
+  const { workflowRunning, apiFetch } = useWorkflow();
   const [localFrames, setLocalFrames] = useState<string[]>(data.frames || []);
   const [status, setStatus] = useState<'idle' | 'extracting' | 'done' | 'error'>(data.status || 'idle');
-  const [targetFrameCount, setTargetFrameCount] = useState(data.targetFrameCount || 120);
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
-  const [pointcloudProgress, setPointcloudProgress] = useState<string | null>(null);
 
-  // Helper: push status update to downstream PointCloudNode
-  const pushToPointCloudNode = useCallback((update: Partial<PointCloudNodeData['data']>) => {
+  const resolveFrameCount = useCallback((): number => {
     const edges = getEdges();
-    const downstreamEdge = edges.find((edge) => edge.source === id);
-    if (downstreamEdge) {
-      const targetId = downstreamEdge.target;
-      setNodes((nds) =>
-        nds.map((n) =>
-          n.id === targetId
-            ? { ...n, data: { ...n.data, ...update } }
-            : n
-        )
-      );
-    }
-  }, [id, setNodes, getEdges]);
-
-  // Trigger point cloud generation when frames are ready
-  const triggerPointcloudGeneration = useCallback((framePaths: string[]) => {
-    pushToPointCloudNode({ status: 'processing', progressText: 'Starting point cloud generation...', progressStep: 0, errorMessage: null });
-    setPointcloudProgress('Starting point cloud generation...');
-
-    // Read enableDepthFusion & enableSegmentation from the downstream point cloud node
-    const edges = getEdges();
-    const downstreamEdge = edges.find((edge) => edge.source === id);
-    let enableDepthFusion = true;
-    let enableSegmentation = true;
-    if (downstreamEdge) {
-      const nodes = getNodes();
-      const pcNode = nodes.find((n) => n.id === downstreamEdge.target);
-      if (pcNode) {
-        if (typeof pcNode.data.enableDepthFusion === 'boolean') {
-          enableDepthFusion = pcNode.data.enableDepthFusion;
-        }
-        if (typeof pcNode.data.enableSegmentation === 'boolean') {
-          enableSegmentation = pcNode.data.enableSegmentation;
-        }
+    const nodes = getNodes();
+    const incoming = edges.find((e) => e.target === id && e.targetHandle === 'input');
+    if (incoming) {
+      const src = nodes.find((n) => n.id === incoming.source);
+      if (src?.type === 'videoUpload') {
+        const c = (src.data as { targetFrameCount?: unknown }).targetFrameCount;
+        if (typeof c === 'number' && c >= 1 && c <= 300) return c;
       }
     }
-
-    apiFetch('/api/generate-pointcloud', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        framePaths,
-        enableDepthFusion,
-        enableSegmentation,
-        ephemeralSessionId,
-      }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          setPointcloudProgress(null);
-          pushToPointCloudNode({ status: 'error', errorMessage: result.error || 'Failed to start point cloud generation', progressText: null });
-          return;
-        }
-        const taskId = result.taskId;
-        let retries = 0;
-        const MAX_RETRIES = 120; // 120 * 2s = 4 min max wait for 404
-        const poll = () => {
-          fetch(`/api/pointcloud-status?taskId=${taskId}`)
-            .then((r) => r.json())
-            .then((task) => {
-              if (task.status === 'processing') {
-                const progress = task.progress || 'Processing...';
-                const step = typeof task.progressStep === 'number' ? task.progressStep : 0;
-                setPointcloudProgress(progress);
-                pushToPointCloudNode({ status: 'processing', progressText: progress, progressStep: step });
-                setTimeout(poll, 2000);
-              } else if (task.status === 'done' && task.result) {
-                setPointcloudProgress(null);
-                pushToPointCloudNode({
-                  plyUrl: task.result.plyUrl,
-                  pointCount: task.result.pointCount,
-                  layerFiles: task.result.layerFiles || [],
-                  layerNames: task.result.layerNames || [],
-                  status: 'done',
-                  progressText: null,
-                  progressStep: null,
-                  errorMessage: null,
-                });
-              } else if (task.status === 'error') {
-                setPointcloudProgress(null);
-                const errMsg = task.error || 'Point cloud generation failed';
-                console.error('[FrameExtraction] Pointcloud generation failed:', errMsg);
-                pushToPointCloudNode({ status: 'error', errorMessage: errMsg, progressText: null, progressStep: null });
-              } else if (task.error && !task.status) {
-                // 404 or similar - task may still be initializing, retry
-                retries++;
-                if (retries < MAX_RETRIES) {
-                  setTimeout(poll, 2000);
-                } else {
-                  setPointcloudProgress(null);
-                  pushToPointCloudNode({ status: 'error', errorMessage: 'Task query timeout', progressText: null, progressStep: null });
-                }
-              }
-            })
-            .catch(() => {
-              setPointcloudProgress(null);
-              pushToPointCloudNode({ status: 'error', errorMessage: 'Polling progress failed', progressText: null, progressStep: null });
-            });
-        };
-        setTimeout(poll, 1000);
-      })
-      .catch(() => {
-        setPointcloudProgress(null);
-        pushToPointCloudNode({ status: 'error', errorMessage: 'Point cloud generation request failed', progressText: null, progressStep: null });
-      });
-  }, [pushToPointCloudNode, apiFetch, getEdges, getNodes, ephemeralSessionId]);
+    if (typeof data.targetFrameCount === 'number' && data.targetFrameCount >= 1 && data.targetFrameCount <= 300) {
+      return data.targetFrameCount;
+    }
+    return 120;
+  }, [id, getEdges, getNodes, data.targetFrameCount]);
 
   // Auto-trigger frame extraction when workflow is running and video is ready
   useEffect(() => {
@@ -927,6 +1257,8 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
 
   const handleExtractFrames = useCallback(() => {
     if (!data.videoServerPath) return;
+
+    const frameCount = resolveFrameCount();
 
     setStatus('extracting');
     setErrorMessage(null);
@@ -941,7 +1273,7 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
     apiFetch('/api/extract-frames', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ videoPath: data.videoServerPath, frameCount: targetFrameCount }),
+      body: JSON.stringify({ videoPath: data.videoServerPath, frameCount }),
     })
       .then((res) => res.json())
       .then((result) => {
@@ -971,7 +1303,7 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
                     frames,
                     outputFolder,
                     frameCount,
-                    targetFrameCount,
+                    targetFrameCount: frameCount,
                     status: 'done',
                     errorMessage: null,
                   },
@@ -980,8 +1312,6 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
           )
         );
 
-        // Auto-trigger point cloud generation after frame extraction completes
-        triggerPointcloudGeneration(frames);
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : 'Frame extraction request failed';
@@ -995,31 +1325,17 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
           )
         );
       });
-  }, [id, data.videoServerPath, targetFrameCount, setNodes, triggerPointcloudGeneration, apiFetch]);
+  }, [id, data.videoServerPath, resolveFrameCount, setNodes, apiFetch]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
   }, [id, setNodes]);
 
-  const handleFrameCountInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const val = parseInt(e.target.value, 10);
-      if (!isNaN(val) && val >= 1 && val <= 300) {
-        setTargetFrameCount(val);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, targetFrameCount: val } }
-              : n
-          )
-        );
-      }
-    },
-    [id, setNodes]
-  );
-
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle('frameExtraction', status)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="frameExtraction" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'input', label: 'Video', color: '#4a6a8a' },
@@ -1035,9 +1351,6 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
           </div>
         )}
         <PreviewBox className="h-[140px]" placeholder="Frame preview area">
-          <div className="absolute left-1.5 top-1.5 z-10">
-            <StatusBadge status={status} />
-          </div>
           {localFrames.length > 0 && (
             <div className="grid h-full w-full grid-cols-3 gap-0.5 p-0.5">
               {localFrames.slice(0, 6).map((frame, i) => (
@@ -1048,22 +1361,10 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
           {status === 'extracting' && (
             <div className="flex items-center gap-2 text-xs text-[#7a8a9a]">
               <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#4a5a6a] border-t-[#7a8a9a]" />
-              Extracting {targetFrameCount} frames...
+              Extracting {resolveFrameCount()} frames...
             </div>
           )}
         </PreviewBox>
-        {/* Frame count selector */}
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-zinc-400 whitespace-nowrap">Frame count</span>
-          <input
-            type="number"
-            min={1}
-            max={300}
-            value={targetFrameCount}
-            onChange={handleFrameCountInput}
-            className="h-6 w-14 rounded border border-zinc-600 bg-zinc-900 px-1.5 text-center text-xs text-zinc-200 outline-none focus:border-[#6b5f7a]/60"
-          />
-        </div>
         {/* Extract / Re-extract button */}
         {data.videoServerPath && (
           <button
@@ -1087,12 +1388,6 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
             Extracted {data.frameCount} frames
           </p>
         )}
-        {pointcloudProgress && (
-          <div className="flex items-center gap-2 text-xs text-[#7aaa9e]">
-            <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#4a6a64] border-t-[#7aaa9e]" />
-            {pointcloudProgress}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1106,75 +1401,52 @@ const LAYER_DISPLAY_COLORS = [
   '#00FF80', '#808000', '#800000', '#008080',
 ];
 
-/* ========== Pipeline Steps Indicator ========== */
-function getPipelineSteps(enableDepthFusion: boolean, enableSegmentation: boolean) {
-  const steps = [
-    { step: 1, label: 'Prepare Frames' },
-    { step: 2, label: 'Feature Extraction' },
-    { step: 3, label: 'Feature Matching' },
-    { step: 4, label: 'Sparse Recon' },
-    { step: 5, label: 'Undistortion' },
-    { step: 6, label: 'Dense Matching' },
-    { step: 7, label: 'Dense Fusion' },
-  ];
-  if (enableSegmentation) {
-    steps.push({ step: 8, label: 'Segmentation' });
-  }
-  if (enableDepthFusion) {
-    steps.push({ step: 9, label: 'Depth Estimation' });
-    steps.push({ step: 10, label: 'Depth Fusion' });
-  }
-  steps.push({ step: 11, label: 'Generate PLY' });
-  return steps;
-}
+const GAUSSIAN_PIPELINE_STEPS = [
+  { step: 1, label: 'Prepare COLMAP' },
+  { step: 2, label: 'Features' },
+  { step: 3, label: 'Matching' },
+  { step: 4, label: 'Camera Poses' },
+  { step: 5, label: 'NS Dataset' },
+  { step: 6, label: 'Splatfacto' },
+  { step: 7, label: 'Export PLY' },
+];
 
-function PipelineSteps({ currentStep, enableDepthFusion = true, enableSegmentation = true }: { currentStep: number; enableDepthFusion?: boolean; enableSegmentation?: boolean }) {
-  const steps = getPipelineSteps(enableDepthFusion, enableSegmentation);
+function GaussianPipelineSteps({ currentStep }: { currentStep: number }) {
   return (
-    <div className="flex items-start gap-0">
-      {steps.map((s, i) => {
+    <div className="flex w-full items-start gap-0 px-1">
+      {GAUSSIAN_PIPELINE_STEPS.map((s, i) => {
         const isCompleted = currentStep > s.step;
         const isCurrent = currentStep === s.step;
         return (
-          <div key={s.step} className="flex flex-col items-center" style={{ width: `${100 / steps.length}%` }}>
-            {/* Connector line + circle */}
+          <div key={s.step} className="flex min-w-0 flex-1 flex-col items-center">
             <div className="flex w-full items-center">
-              {/* Left connector */}
               {i > 0 && (
                 <div
-                  className={`h-px flex-1 ${currentStep > steps[i - 1].step ? 'bg-[#5a8a82]' : 'bg-zinc-700'}`}
+                  className={`h-px flex-1 ${currentStep > GAUSSIAN_PIPELINE_STEPS[i - 1].step ? 'bg-[#7f70c7]' : 'bg-zinc-700'}`}
                 />
               )}
-              {/* Circle indicator */}
               <div
                 className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
                   isCompleted
-                    ? 'border-[#5a8a82] bg-[#5a8a82]'
+                    ? 'border-[#7f70c7] bg-[#7f70c7]'
                     : isCurrent
-                      ? 'border-[#5a8a82] bg-[#5a8a82]/30'
+                      ? 'border-[#b9a7ff] bg-[#6f5aa8]'
                       : 'border-zinc-600 bg-zinc-800'
                 }`}
               >
-                {isCompleted && <Check size={9} className="text-white" />}
-                {isCurrent && (
-                  <div className="h-1.5 w-1.5 rounded-full bg-[#7aaa9e]" />
+                {isCompleted ? (
+                  <Check size={9} className="text-white" />
+                ) : (
+                  <span className={`text-[8px] ${isCurrent ? 'text-white' : 'text-zinc-500'}`}>{s.step}</span>
                 )}
               </div>
-              {/* Right connector */}
-              {i < steps.length - 1 && (
-                <div
-                  className={`h-px flex-1 ${currentStep > s.step ? 'bg-[#5a8a82]' : 'bg-zinc-700'}`}
-                />
+              {i < GAUSSIAN_PIPELINE_STEPS.length - 1 && (
+                <div className={`h-px flex-1 ${currentStep > s.step ? 'bg-[#7f70c7]' : 'bg-zinc-700'}`} />
               )}
             </div>
-            {/* Label */}
             <span
-              className={`mt-1 text-center text-[9px] leading-tight ${
-                isCompleted
-                  ? 'text-[#7aaa9e]'
-                  : isCurrent
-                    ? 'text-[#7aaa9e] font-medium'
-                    : 'text-zinc-600'
+              className={`mt-1 max-w-[42px] text-center text-[7px] leading-tight ${
+                isCurrent ? 'text-[#c6b8ff]' : isCompleted ? 'text-[#9d8df0]' : 'text-zinc-600'
               }`}
             >
               {s.label}
@@ -1187,164 +1459,123 @@ function PipelineSteps({ currentStep, enableDepthFusion = true, enableSegmentati
 }
 
 /* ====================================================================
-   3. Point Cloud Generation Node
+   3. Gaussian Splat Generation Node
    ==================================================================== */
-export function PointCloudNode({ id, data }: NodeProps<PointCloudNodeData>) {
-  const { setNodes, getEdges } = useReactFlow();
-  const { workflowRunning, apiFetch } = useWorkflow();
-  const fileInputRef = useRef<HTMLInputElement>(null);
+export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>) {
+  const { setNodes } = useReactFlow();
+  const { workflowRunning, apiFetch, ephemeralSessionId } = useWorkflow();
+  const plyFileInputRef = useRef<HTMLInputElement>(null);
+  const [framePaths, setFramePaths] = useState<string[]>(data.framePaths || []);
+  const [sourcePlyUrl, setSourcePlyUrl] = useState<string | null>(data.sourcePlyUrl);
+  const [splatUrl, setSplatUrl] = useState<string | null>(data.splatUrl);
+  const [gaussianCount, setGaussianCount] = useState<number | null>(data.gaussianCount);
   const [status, setStatus] = useState<'idle' | 'processing' | 'done' | 'error'>(data.status || 'idle');
-  const [pointCount, setPointCount] = useState<number | null>(data.pointCount);
-  const [plyUrl, setPlyUrl] = useState<string | null>(data.plyUrl);
   const [progressText, setProgressText] = useState<string | null>(data.progressText);
   const [progressStep, setProgressStep] = useState<number | null>(data.progressStep);
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
+  const [trainingIterations, setTrainingIterations] = useState(
+    typeof data.trainingIterations === 'number' ? data.trainingIterations : 1000
+  );
+  const [currentTrainingIteration, setCurrentTrainingIteration] = useState<number | null>(data.currentTrainingIteration ?? null);
+  const [maxTrainingIterations, setMaxTrainingIterations] = useState<number | null>(data.maxTrainingIterations ?? null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(data.activeTaskId ?? null);
+  const [deviceType, setDeviceType] = useState<GaussianDeviceType | null>(data.deviceType ?? null);
+  const [computeBackend, setComputeBackend] = useState<string | null>(data.computeBackend);
+  const [trainingMode, setTrainingMode] = useState<GaussianTrainingMode>(normalizeGaussianTrainingMode(data.trainingMode));
+  const [targetPlyType, setTargetPlyType] = useState<string | null>(data.targetPlyType ?? null);
+  const [trueTrainingAvailable, setTrueTrainingAvailable] = useState<boolean | null>(
+    typeof data.trueTrainingAvailable === 'boolean' ? data.trueTrainingAvailable : null
+  );
+  const [trueTrainingUnavailableReason, setTrueTrainingUnavailableReason] = useState<string | null>(
+    data.trueTrainingUnavailableReason ?? null
+  );
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [enableDepthFusion, setEnableDepthFusion] = useState(data.enableDepthFusion !== false);
-  const [enableSegmentation, setEnableSegmentation] = useState(data.enableSegmentation !== false);
+  const [plyUploading, setPlyUploading] = useState(false);
+  const deviceDetectionStartedRef = useRef(false);
+  const cancelRequestedRef = useRef(false);
+  const previousWorkflowRunningRef = useRef(workflowRunning);
+  const activeRunIdRef = useRef<string | null>(null);
 
-  // Sync from upstream data changes
   useEffect(() => {
-    if (data.status !== status) {
-      setStatus(data.status);
-    }
-    if (data.plyUrl && data.plyUrl !== plyUrl) {
-      setPlyUrl(data.plyUrl);
-    }
-    if (data.pointCount !== pointCount) {
-      setPointCount(data.pointCount);
-    }
-    if (data.progressText !== progressText) {
-      setProgressText(data.progressText);
-    }
-    if (data.progressStep !== progressStep) {
-      setProgressStep(data.progressStep);
-    }
-    if (data.errorMessage !== errorMessage) {
-      setErrorMessage(data.errorMessage);
-    }
-    if (data.enableDepthFusion !== enableDepthFusion) {
-      setEnableDepthFusion(data.enableDepthFusion !== false);
-    }
-    if (data.enableSegmentation !== enableSegmentation) {
-      setEnableSegmentation(data.enableSegmentation !== false);
+    const incomingFrames = data.framePaths || [];
+    const framesChanged =
+      incomingFrames.length !== framePaths.length ||
+      incomingFrames.some((frame, index) => frame !== framePaths[index]);
+    if (framesChanged) setFramePaths(incomingFrames);
+    if (data.sourcePlyUrl !== sourcePlyUrl) setSourcePlyUrl(data.sourcePlyUrl);
+    if (data.splatUrl !== splatUrl) setSplatUrl(data.splatUrl);
+    if (data.gaussianCount !== gaussianCount) setGaussianCount(data.gaussianCount);
+    if (data.status !== status) setStatus(data.status || 'idle');
+    if (data.progressText !== progressText) setProgressText(data.progressText);
+    if (data.progressStep !== progressStep) setProgressStep(data.progressStep);
+    if (data.errorMessage !== errorMessage) setErrorMessage(data.errorMessage);
+    const incomingTrainingIterations = typeof data.trainingIterations === 'number' ? data.trainingIterations : 1000;
+    if (incomingTrainingIterations !== trainingIterations) setTrainingIterations(incomingTrainingIterations);
+    if (data.currentTrainingIteration !== currentTrainingIteration) setCurrentTrainingIteration(data.currentTrainingIteration ?? null);
+    if (data.maxTrainingIterations !== maxTrainingIterations) setMaxTrainingIterations(data.maxTrainingIterations ?? null);
+    if (data.activeTaskId !== activeTaskId) setActiveTaskId(data.activeTaskId ?? null);
+    if (data.deviceType !== deviceType) setDeviceType(data.deviceType ?? null);
+    if (data.computeBackend !== computeBackend) setComputeBackend(data.computeBackend);
+    const incomingTrainingMode = normalizeGaussianTrainingMode(data.trainingMode);
+    if (incomingTrainingMode !== trainingMode) setTrainingMode(incomingTrainingMode);
+    if (data.targetPlyType !== targetPlyType) setTargetPlyType(data.targetPlyType ?? null);
+    const incomingTrueTrainingAvailable =
+      typeof data.trueTrainingAvailable === 'boolean' ? data.trueTrainingAvailable : null;
+    if (incomingTrueTrainingAvailable !== trueTrainingAvailable) setTrueTrainingAvailable(incomingTrueTrainingAvailable);
+    if (data.trueTrainingUnavailableReason !== trueTrainingUnavailableReason) {
+      setTrueTrainingUnavailableReason(data.trueTrainingUnavailableReason ?? null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.status, data.plyUrl, data.pointCount, data.progressText, data.progressStep, data.errorMessage, data.enableDepthFusion, data.enableSegmentation]);
-
-  // Push plyUrl + layer metadata to downstream whenever PLY URL or segmentation outputs change
-  useEffect(() => {
-    if (!data.plyUrl) return;
-    const edges = getEdges();
-    const downstreamEdges = edges.filter((edge) => edge.source === id);
-    if (downstreamEdges.length === 0) return;
-
-    const currentLayerFiles = data.layerFiles || [];
-    const currentLayerNames = data.layerNames || [];
-    setNodes((nds) =>
-      nds.map((n) => {
-        const edge = downstreamEdges.find((e) => e.target === n.id);
-        if (!edge) return n;
-        const baseUpdate: Record<string, unknown> = {
-          modelUrl: data.plyUrl,
-          inputType: 'ply' as const,
-          layerFiles: currentLayerFiles,
-          layerNames: currentLayerNames,
-        };
-        if (edge.targetHandle === 'model-input' || edge.targetHandle === 'obj-input') {
-          return { ...n, data: { ...n.data, ...baseUpdate } };
-        }
-        return { ...n, data: { ...n.data, ...baseUpdate } };
-      })
-    );
-  }, [data.plyUrl, data.layerFiles, data.layerNames, id, getEdges, setNodes]);
+  }, [data.framePaths, data.sourcePlyUrl, data.splatUrl, data.gaussianCount, data.status, data.progressText, data.progressStep, data.errorMessage, data.trainingIterations, data.currentTrainingIteration, data.maxTrainingIterations, data.activeTaskId, data.deviceType, data.computeBackend, data.trainingMode, data.targetPlyType, data.trueTrainingAvailable, data.trueTrainingUnavailableReason]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
   }, [id, setNodes]);
 
-  const handlePlyUpload = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      e.target.value = '';
+  const updateTrainingIterations = useCallback((value: number) => {
+    setTrainingIterations(value);
+    setNodes((nds) =>
+      nds.map((n) => n.id === id ? { ...n, data: { ...n.data, trainingIterations: value } } : n)
+    );
+  }, [id, setNodes]);
 
-      setStatus('processing');
-      setProgressText('Uploading...');
-      setNodes((nds) =>
-        nds.map((n) =>
-          n.id === id
-            ? { ...n, data: { ...n.data, status: 'processing', progressText: 'Uploading...' } }
-            : n
-        )
-      );
+  const updateTrainingMode = useCallback((value: GaussianTrainingMode) => {
+    if (status === 'processing') return;
+    setTrainingMode(value);
+    setTargetPlyType(null);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? { ...n, data: { ...n.data, trainingMode: value, targetPlyType: null } }
+          : n
+      )
+    );
+  }, [id, setNodes, status]);
 
-      void (async () => {
-        const r = await ingestPlyToPointCloudNode({
-          apiFetch,
-          file,
-          fileLabel: file.name,
-          enableSegmentation,
-          onUploadComplete: enableSegmentation
-            ? async ({ plyUrl: pu, pointCount: pc }) => {
-                setPlyUrl(pu);
-                setPointCount(pc);
-                setProgressText('Segmenting...');
-                setNodes((nds) =>
-                  nds.map((n) =>
-                    n.id === id
-                      ? {
-                          ...n,
-                          data: {
-                            ...n.data,
-                            plyUrl: pu,
-                            pointCount: pc,
-                            progressText: 'Segmenting...',
-                          },
-                        }
-                      : n
-                  )
-                );
-              }
-            : undefined,
-        });
+  useEffect(() => {
+    if (deviceDetectionStartedRef.current) return;
+    deviceDetectionStartedRef.current = true;
+    let cancelled = false;
 
-        if (!r.ok) {
-          setStatus('error');
-          setErrorMessage(r.errorMessage);
-          setProgressText(null);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? {
-                    ...n,
-                    data: {
-                      ...n.data,
-                      status: 'error',
-                      errorMessage: r.errorMessage,
-                      progressText: null,
-                    },
-                  }
-                : n
-            )
-          );
-          return;
+    void apiFetch('/api/gaussian-device')
+      .then((res) => res.json())
+      .then((result) => {
+        if (cancelled) return;
+        const nextDeviceType = normalizeGaussianDeviceType(result.deviceType);
+        if (!nextDeviceType) return;
+        const nextTrueTrainingAvailable =
+          typeof result.trueTrainingAvailable === 'boolean' ? result.trueTrainingAvailable : nextDeviceType === 'cuda';
+        const nextUnavailableReason =
+          typeof result.trueTrainingUnavailableReason === 'string' ? result.trueTrainingUnavailableReason : null;
+        const nextTrainingMode =
+          !nextTrueTrainingAvailable && trainingMode === 'train' ? 'auto' : trainingMode;
+        setDeviceType(nextDeviceType);
+        setTrueTrainingAvailable(nextTrueTrainingAvailable);
+        setTrueTrainingUnavailableReason(nextUnavailableReason);
+        if (nextTrainingMode !== trainingMode) {
+          setTrainingMode(nextTrainingMode);
+          setTargetPlyType(null);
         }
-
-        setStatus('done');
-        setPlyUrl(r.plyUrl);
-        setPointCount(r.pointCount);
-        setProgressText(null);
-        setErrorMessage(null);
-
-        void recordAsset({
-          name: file.name || 'pointcloud',
-          assetType: 'pointcloud',
-          fileUrl: r.plyUrl,
-          fileType: 'ply',
-          sourceNode: 'pointCloud',
-        });
-
         setNodes((nds) =>
           nds.map((n) =>
             n.id === id
@@ -1352,215 +1583,786 @@ export function PointCloudNode({ id, data }: NodeProps<PointCloudNodeData>) {
                   ...n,
                   data: {
                     ...n.data,
-                    status: 'done',
-                    plyUrl: r.plyUrl,
-                    pointCount: r.pointCount,
-                    layerFiles: r.layerFiles,
-                    layerNames: r.layerNames,
+                    deviceType: nextDeviceType,
+                    trueTrainingAvailable: nextTrueTrainingAvailable,
+                    trueTrainingUnavailableReason: nextUnavailableReason,
+                    trainingMode: nextTrainingMode,
+                    targetPlyType: nextTrainingMode === trainingMode ? n.data.targetPlyType : null,
+                  },
+                }
+              : n
+          )
+        );
+      })
+      .catch(() => {
+        deviceDetectionStartedRef.current = false;
+      });
+
+    return () => {
+      cancelled = true;
+      deviceDetectionStartedRef.current = false;
+    };
+  }, [apiFetch, id, setNodes, trainingMode]);
+
+  useEffect(() => {
+    if (trueTrainingAvailable !== false || trainingMode !== 'train') return;
+    updateTrainingMode('auto');
+  }, [trainingMode, trueTrainingAvailable, updateTrainingMode]);
+
+  useEffect(() => {
+    if (status !== 'error' || trueTrainingAvailable !== false || !errorMessage) return;
+    const lowerMessage = errorMessage.toLowerCase();
+    if (!lowerMessage.includes('gsplat') || !lowerMessage.includes('cuda')) return;
+
+    setStatus('idle');
+    setProgressText(null);
+    setProgressStep(null);
+    setErrorMessage(null);
+    setCurrentTrainingIteration(null);
+    setMaxTrainingIterations(null);
+    setActiveTaskId(null);
+    setTrainingMode('auto');
+    setTargetPlyType(null);
+    cancelRequestedRef.current = false;
+    activeRunIdRef.current = null;
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                status: 'idle' as const,
+                progressText: null,
+                progressStep: null,
+                errorMessage: null,
+                currentTrainingIteration: null,
+                maxTrainingIterations: null,
+                activeTaskId: null,
+                trainingMode: 'auto' as const,
+                targetPlyType: null,
+              },
+            }
+          : n
+      )
+    );
+  }, [errorMessage, id, setNodes, status, trueTrainingAvailable]);
+
+  const handlePreviewUploadClick = useCallback(() => {
+    if (status === 'processing' || plyUploading) return;
+    plyFileInputRef.current?.click();
+  }, [plyUploading, status]);
+
+  const handleSourcePlyUpload = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+
+      if (!file.name.toLowerCase().endsWith('.ply')) {
+        setStatus('error');
+        setErrorMessage('Please upload a .ply file');
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === id
+              ? { ...n, data: { ...n.data, status: 'error' as const, errorMessage: 'Please upload a .ply file' } }
+              : n
+          )
+        );
+        return;
+      }
+
+      setPlyUploading(true);
+      setErrorMessage(null);
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('type', 'pointcloud/splat-source');
+
+      void apiFetch('/api/upload-model', { method: 'POST', body: formData })
+        .then((res) => res.json())
+        .then((result) => {
+          if (!result.success || !result.url) {
+            throw new Error(result.error || 'PLY upload failed');
+          }
+          const uploadedUrl = result.url as string;
+          setFramePaths([]);
+          setSourcePlyUrl(uploadedUrl);
+          setSplatUrl(null);
+          setGaussianCount(null);
+          setStatus('idle');
+          setProgressText(null);
+          setProgressStep(null);
+          setErrorMessage(null);
+          setCurrentTrainingIteration(null);
+          setMaxTrainingIterations(null);
+          setActiveTaskId(null);
+          setComputeBackend(null);
+          setTargetPlyType(null);
+          setNodes((nds) =>
+            nds.map((n) =>
+              n.id === id
+                ? {
+                    ...n,
+                    data: {
+                      ...n.data,
+                      framePaths: [] as string[],
+                      sourcePlyUrl: uploadedUrl,
+                      splatUrl: null,
+                      gaussianCount: null,
+                      status: 'idle' as const,
+                      progressText: null,
+                      progressStep: null,
+                      errorMessage: null,
+                      currentTrainingIteration: null,
+                      maxTrainingIterations: null,
+                      activeTaskId: null,
+                      computeBackend: null,
+                      targetPlyType: null,
+                      layerFiles: [] as string[],
+                      layerNames: [] as string[],
+                    },
+                  }
+                : n
+            )
+          );
+        })
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : 'PLY upload failed';
+          setStatus('error');
+          setErrorMessage(message);
+          setNodes((nds) =>
+            nds.map((n) =>
+              n.id === id
+                ? { ...n, data: { ...n.data, status: 'error' as const, errorMessage: message } }
+                : n
+            )
+          );
+        })
+        .finally(() => {
+          setPlyUploading(false);
+        });
+    },
+    [apiFetch, id, setNodes]
+  );
+
+  const handleClearGaussianSplat = useCallback(() => {
+    if (status === 'processing' || plyUploading) return;
+    setFramePaths([]);
+    setSourcePlyUrl(null);
+    setSplatUrl(null);
+    setGaussianCount(null);
+    setStatus('idle');
+    setProgressText(null);
+    setProgressStep(null);
+    setErrorMessage(null);
+    setCurrentTrainingIteration(null);
+    setMaxTrainingIterations(null);
+    setActiveTaskId(null);
+    setComputeBackend(null);
+    setTargetPlyType(null);
+    cancelRequestedRef.current = false;
+    activeRunIdRef.current = null;
+    if (plyFileInputRef.current) plyFileInputRef.current.value = '';
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                framePaths: [] as string[],
+                sourcePlyUrl: null,
+                splatUrl: null,
+                gaussianCount: null,
+                status: 'idle' as const,
+                progressText: null,
+                progressStep: null,
+                errorMessage: null,
+                currentTrainingIteration: null,
+                maxTrainingIterations: null,
+                activeTaskId: null,
+                computeBackend: null,
+                targetPlyType: null,
+                layerFiles: [] as string[],
+                layerNames: [] as string[],
+              },
+            }
+          : n
+      )
+    );
+  }, [id, plyUploading, setNodes, status]);
+
+  const handleGenerateSplat = useCallback(() => {
+    const hasFrames = framePaths.length > 0;
+    const hasPly = !!sourcePlyUrl;
+    if (status === 'processing' || activeRunIdRef.current) return;
+    if ((!hasFrames && !hasPly) || !ephemeralSessionId) return;
+
+    setStatus('processing');
+    setProgressText(hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...');
+    setProgressStep(0);
+    setErrorMessage(null);
+    setCurrentTrainingIteration(null);
+    setMaxTrainingIterations(trainingIterations);
+    setActiveTaskId(null);
+    cancelRequestedRef.current = false;
+    const runId = crypto.randomUUID();
+    activeRunIdRef.current = runId;
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                status: 'processing' as const,
+                progressText: hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...',
+                progressStep: 0,
+                errorMessage: null,
+                trainingMode,
+                currentTrainingIteration: null,
+                maxTrainingIterations: trainingIterations,
+                activeTaskId: null,
+              },
+            }
+          : n
+      )
+    );
+
+    void (async () => {
+      try {
+        const startRes = await apiFetch('/api/generate-gaussian-splat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            framePaths: hasFrames ? framePaths : undefined,
+            plyUrl: hasFrames ? undefined : sourcePlyUrl,
+            trainingIterations,
+            trainingMode,
+            ephemeralSessionId,
+          }),
+        });
+        const started = await startRes.json();
+        if (!started.success) {
+          throw new Error(started.error || 'Failed to start Gaussian splat generation');
+        }
+        const startedDeviceType = normalizeGaussianDeviceType(started.deviceType);
+        const startedTrainingMode = normalizeGaussianTrainingMode(started.trainingMode);
+        const startedTargetPlyType = typeof started.targetPlyType === 'string' ? started.targetPlyType : null;
+        const startedTrueTrainingAvailable =
+          typeof started.trueTrainingAvailable === 'boolean' ? started.trueTrainingAvailable : undefined;
+        const startedTrueTrainingUnavailableReason =
+          typeof started.trueTrainingUnavailableReason === 'string' ? started.trueTrainingUnavailableReason : null;
+        if (startedDeviceType) setDeviceType(startedDeviceType);
+        setTrainingMode(startedTrainingMode);
+        setTargetPlyType(startedTargetPlyType);
+        if (typeof startedTrueTrainingAvailable === 'boolean') setTrueTrainingAvailable(startedTrueTrainingAvailable);
+        setTrueTrainingUnavailableReason(startedTrueTrainingUnavailableReason);
+        if (activeRunIdRef.current !== runId) return;
+        if (cancelRequestedRef.current) {
+          await apiFetch('/api/cancel-gaussian-splat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taskId: started.taskId }),
+          }).catch(() => {});
+          throw new Error('Gaussian splat generation stopped');
+        }
+        setActiveTaskId(started.taskId);
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === id
+              ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    activeTaskId: started.taskId,
+                    deviceType: startedDeviceType ?? n.data.deviceType,
+                    trainingMode: startedTrainingMode,
+                    targetPlyType: startedTargetPlyType,
+                    trueTrainingAvailable: startedTrueTrainingAvailable ?? n.data.trueTrainingAvailable,
+                    trueTrainingUnavailableReason: startedTrueTrainingUnavailableReason,
+                  },
+                }
+              : n
+          )
+        );
+
+        const result = await waitForGaussianTask(started.taskId, apiFetch, (task) => {
+          if (activeRunIdRef.current !== runId) return;
+          const nextProgress = task.progress || 'Generating splats...';
+          setProgressText(nextProgress);
+          setProgressStep(task.progressStep ?? null);
+          if (task.deviceType) setDeviceType(task.deviceType);
+          if (task.computeBackend) setComputeBackend(task.computeBackend);
+          if (task.trainingMode) setTrainingMode(task.trainingMode);
+          if (task.targetPlyType) setTargetPlyType(task.targetPlyType);
+          if (typeof task.trueTrainingAvailable === 'boolean') setTrueTrainingAvailable(task.trueTrainingAvailable);
+          if (task.trueTrainingUnavailableReason) setTrueTrainingUnavailableReason(task.trueTrainingUnavailableReason);
+          if (typeof task.currentTrainingIteration === 'number') {
+            setCurrentTrainingIteration(task.currentTrainingIteration);
+          }
+          if (typeof task.maxTrainingIterations === 'number') {
+            setMaxTrainingIterations(task.maxTrainingIterations);
+          }
+          setNodes((nds) =>
+            nds.map((n) =>
+              n.id === id
+                ? {
+                    ...n,
+                    data: {
+                      ...n.data,
+                      progressText: nextProgress,
+                      progressStep: task.progressStep ?? null,
+                      deviceType: task.deviceType ?? n.data.deviceType,
+                      computeBackend: task.computeBackend ?? n.data.computeBackend,
+                      trainingMode: task.trainingMode ?? n.data.trainingMode,
+                      targetPlyType: task.targetPlyType ?? n.data.targetPlyType,
+                      trueTrainingAvailable: task.trueTrainingAvailable ?? n.data.trueTrainingAvailable,
+                      trueTrainingUnavailableReason:
+                        task.trueTrainingUnavailableReason ?? n.data.trueTrainingUnavailableReason,
+                      currentTrainingIteration:
+                        typeof task.currentTrainingIteration === 'number'
+                          ? task.currentTrainingIteration
+                          : n.data.currentTrainingIteration,
+                      maxTrainingIterations:
+                        typeof task.maxTrainingIterations === 'number'
+                          ? task.maxTrainingIterations
+                          : n.data.maxTrainingIterations,
+                    },
+                  }
+                : n
+            )
+          );
+        });
+
+        if (activeRunIdRef.current !== runId) return;
+        setStatus('done');
+        setProgressText(null);
+        setProgressStep(null);
+        setErrorMessage(null);
+        setCurrentTrainingIteration(null);
+        setMaxTrainingIterations(null);
+        setActiveTaskId(null);
+        activeRunIdRef.current = null;
+        setSplatUrl(result.splatUrl);
+        setSourcePlyUrl(result.sourcePlyUrl);
+        setGaussianCount(result.gaussianCount);
+        setDeviceType(result.deviceType ?? deviceType);
+        setComputeBackend(result.computeBackend || null);
+        setTrainingMode(result.trainingMode ?? trainingMode);
+        setTargetPlyType(result.targetPlyType ?? targetPlyType);
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === id
+              ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    sourcePlyUrl: result.sourcePlyUrl,
+                    splatUrl: result.splatUrl,
+                    gaussianCount: result.gaussianCount,
+                    deviceType: result.deviceType ?? n.data.deviceType,
+                    computeBackend: result.computeBackend || null,
+                    trainingMode: result.trainingMode ?? n.data.trainingMode,
+                    targetPlyType: result.targetPlyType ?? n.data.targetPlyType,
+                    layerFiles: result.layerFiles || [],
+                    layerNames: result.layerNames || [],
+                    status: 'done' as const,
                     progressText: null,
                     progressStep: null,
+                    currentTrainingIteration: null,
+                    maxTrainingIterations: null,
+                    activeTaskId: null,
                     errorMessage: null,
                   },
                 }
               : n
           )
         );
-      })();
-    },
-    [enableSegmentation, id, setNodes, apiFetch]
-  );
+        void (async () => {
+          const thumbnailUrl = await createAssetThumbnail({
+            fileUrl: result.splatUrl,
+            ephemeralSessionId,
+          });
+          await recordAsset({
+            name: 'Gaussian splat',
+            assetType: 'splat',
+            fileUrl: result.splatUrl,
+            fileType: 'splat-ply',
+            thumbnailUrl,
+            sourceNode: 'gaussianSplat',
+          });
+        })();
+      } catch (err: unknown) {
+        if (activeRunIdRef.current !== runId && !cancelRequestedRef.current) return;
+        if (cancelRequestedRef.current) {
+          setStatus('idle');
+          setProgressText('Stopped');
+          setProgressStep(null);
+          setErrorMessage(null);
+          setCurrentTrainingIteration(null);
+          setMaxTrainingIterations(null);
+          setActiveTaskId(null);
+          activeRunIdRef.current = null;
+          setNodes((nds) =>
+            nds.map((n) =>
+              n.id === id
+                ? {
+                    ...n,
+                    data: {
+                      ...n.data,
+                      status: 'idle' as const,
+                      progressText: 'Stopped',
+                      progressStep: null,
+                      errorMessage: null,
+                      currentTrainingIteration: null,
+                      maxTrainingIterations: null,
+                      activeTaskId: null,
+                    },
+                  }
+                : n
+            )
+          );
+          return;
+        }
+        const message = err instanceof Error ? err.message : 'Gaussian splat generation failed';
+        setStatus('error');
+        setProgressText(null);
+        setProgressStep(null);
+        setErrorMessage(message);
+        setCurrentTrainingIteration(null);
+        setMaxTrainingIterations(null);
+        setActiveTaskId(null);
+        activeRunIdRef.current = null;
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === id
+              ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    status: 'error' as const,
+                    progressText: null,
+                    progressStep: null,
+                    errorMessage: message,
+                    currentTrainingIteration: null,
+                    maxTrainingIterations: null,
+                    activeTaskId: null,
+                  },
+                }
+              : n
+          )
+        );
+      }
+    })();
+  }, [apiFetch, deviceType, ephemeralSessionId, framePaths, id, setNodes, sourcePlyUrl, status, targetPlyType, trainingIterations, trainingMode]);
+
+  useEffect(() => {
+    if (!workflowRunning) return;
+    if ((framePaths.length === 0 && !sourcePlyUrl) || splatUrl || status !== 'idle') return;
+    handleGenerateSplat();
+  }, [workflowRunning, framePaths, sourcePlyUrl, splatUrl, status, handleGenerateSplat]);
+
+  useEffect(() => {
+    const justStopped = previousWorkflowRunningRef.current && !workflowRunning;
+    previousWorkflowRunningRef.current = workflowRunning;
+    if (!justStopped || status !== 'processing') return;
+
+    cancelRequestedRef.current = true;
+    activeRunIdRef.current = null;
+
+    if (activeTaskId) {
+      void apiFetch('/api/cancel-gaussian-splat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: activeTaskId }),
+      }).catch(() => {});
+    }
+
+    setStatus('idle');
+    setProgressText('Stopped');
+    setProgressStep(null);
+    setErrorMessage(null);
+    setCurrentTrainingIteration(null);
+    setMaxTrainingIterations(null);
+    setActiveTaskId(null);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                status: 'idle' as const,
+                progressText: 'Stopped',
+                progressStep: null,
+                errorMessage: null,
+                currentTrainingIteration: null,
+                maxTrainingIterations: null,
+                activeTaskId: null,
+              },
+            }
+          : n
+      )
+    );
+  }, [activeTaskId, apiFetch, id, setNodes, status, workflowRunning]);
+
+  const hasTrainingProgress =
+    status === 'processing' &&
+    typeof currentTrainingIteration === 'number' &&
+    typeof maxTrainingIterations === 'number' &&
+    maxTrainingIterations > 0;
+  const trainingProgressPercent = hasTrainingProgress
+    ? Math.min(100, Math.max(0, (currentTrainingIteration / maxTrainingIterations) * 100))
+    : 0;
+  const hasGaussianPreviewFile = framePaths.length > 0 || !!sourcePlyUrl || !!splatUrl;
+  const displayDeviceType = deviceType ? deviceType.toUpperCase() : 'detecting';
+  const displayTargetPlyType = targetPlyType || getGaussianTargetPlyLabel(deviceType, trainingMode);
+  const canChooseTrainingMode = deviceType === 'mps' || deviceType === 'cpu';
+  const trueTrainingDisabled = status === 'processing' || trueTrainingAvailable !== true;
+  const trueTrainingReason = trueTrainingUnavailableReason || 'True training requires a CUDA-compatible gsplat runtime.';
 
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
-      <NodeHeader type="pointCloud" onDelete={handleDelete} />
+    <div
+      style={getNodeFrameStyle('gaussianSplat', status)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
+      <NodeHeader type="gaussianSplat" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'input', label: 'Frames', color: '#6b5f7a' },
-        { type: 'source', id: 'ply-output', label: 'Model', color: '#7a4a55' },
+        { type: 'target', id: 'ply-input', label: 'PLY', color: '#4a7a74' },
+        { type: 'source', id: 'splat-output', label: 'Splat', color: '#6f5aa8' },
+        { type: 'source', id: 'mesh-output', label: 'Mesh PLY', color: '#7a4a55' },
       ]} />
-      <div className="p-3 space-y-2">
-        {pointCount && (
-          <div className="flex items-center justify-end">
-            <span className="text-[10px] text-zinc-400">{pointCount.toLocaleString()} pts</span>
-          </div>
-        )}
-        <PreviewBox className="h-[140px]" placeholder="Point cloud preview">
-          <div className="absolute left-1.5 top-1.5 z-10">
-            <StatusBadge status={status === 'error' ? 'error' : status} />
-          </div>
-          {status === 'done' && plyUrl && (
-            <PLYViewer plyUrl={plyUrl} className="h-full w-full" />
-          )}
-          {status === 'done' && !plyUrl && (
-            <div className="flex h-full w-full items-center justify-center">
-              <svg width="120" height="60" viewBox="0 0 120 60">
-                {POINT_CLOUD_DOTS.map((dot, i) => (
-                  <circle
-                    key={i}
-                    cx={dot.cx}
-                    cy={dot.cy}
-                    r={dot.r}
-                    fill={dot.fill}
-                    opacity={dot.opacity}
-                  />
-                ))}
-              </svg>
+      <div className="space-y-2 p-3">
+        <PreviewBox className="h-[140px]" placeholder="Gaussian splat output">
+          {plyUploading && (
+            <div className="flex flex-col items-center gap-2 text-center">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#514179] border-t-[#b9a7ff]" />
+              <span className="text-[11px] text-[#b9a7ff]">Uploading PLY...</span>
             </div>
           )}
-          {status === 'processing' && !plyUrl && (
-            <div className="flex flex-col items-center gap-1.5">
-              <PipelineSteps currentStep={progressStep ?? 0} enableDepthFusion={enableDepthFusion} enableSegmentation={enableSegmentation} />
-              <span className="text-[10px] text-[#7aaa9e]">
-                {getPipelineSteps(enableDepthFusion, enableSegmentation).find(s => s.step === progressStep)?.label || 'Processing...'}
+          {!plyUploading && status === 'idle' && framePaths.length === 0 && !sourcePlyUrl && (
+            <div
+              role="button"
+              tabIndex={0}
+              className="flex h-full w-full cursor-pointer items-center justify-center text-zinc-600 transition-colors hover:text-zinc-500"
+              onClick={handlePreviewUploadClick}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  handlePreviewUploadClick();
+                }
+              }}
+            >
+              <Upload size={24} />
+            </div>
+          )}
+          {!plyUploading && status === 'idle' && (framePaths.length > 0 || sourcePlyUrl) && (
+            <div className="flex flex-col items-center gap-2 text-center">
+              <Sparkles size={24} className="text-[#b9a7ff]" />
+              <span className="text-[11px] text-zinc-400">
+                {framePaths.length > 0 ? `${framePaths.length} frames ready` : 'PLY ready'}
               </span>
             </div>
           )}
-          {status === 'processing' && plyUrl && (
-            <PLYViewer plyUrl={plyUrl} className="h-full w-full" />
+          {!plyUploading && status === 'processing' && (
+            <div className="flex flex-col items-center gap-2 text-center">
+              {framePaths.length > 0 && (
+                <GaussianPipelineSteps currentStep={progressStep ?? 0} />
+              )}
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#514179] border-t-[#b9a7ff]" />
+              <span className="px-3 text-[11px] text-[#b9a7ff]">{progressText || 'Generating splats...'}</span>
+              {hasTrainingProgress && (
+                <div className="w-full max-w-[190px] px-2">
+                  <div className="mb-1 flex items-center justify-between font-mono text-[10px] text-[#c6b8ff]">
+                    <span>Step</span>
+                    <span>
+                      {currentTrainingIteration.toLocaleString()}/{maxTrainingIterations.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-zinc-700">
+                    <div
+                      className="h-full rounded-full bg-[#b9a7ff] transition-[width]"
+                      style={{ width: `${trainingProgressPercent}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {computeBackend && (
+                <span className="text-[10px] text-zinc-500">{computeBackend}</span>
+              )}
+            </div>
           )}
-          {status === 'error' && (
+          {!plyUploading && status === 'done' && splatUrl && (
+            <SplatViewer splatUrl={splatUrl} className="h-full w-full" />
+          )}
+          {!plyUploading && status === 'error' && (
             <div className="flex h-full flex-col items-center justify-center gap-1 px-2">
-              <span className="text-xs text-red-400">Generation failed</span>
+              <span className="text-xs text-red-400">Splat generation failed</span>
               {errorMessage && (
                 <span className="text-center text-[10px] text-zinc-500 line-clamp-3">{errorMessage}</span>
               )}
             </div>
           )}
+          {!plyUploading && status === 'done' && splatUrl && (
+            <PreviewDownloadIconButton
+              onClick={() => {
+                const name = buildPreviewDownloadFilename(data.label, id, '.ply');
+                void downloadFromUrl(splatUrl, name).catch(() => {
+                  /* download may fail on CORS */
+                });
+              }}
+            />
+          )}
+          {!plyUploading && status !== 'processing' && hasGaussianPreviewFile && (
+            <PreviewClearIconButton onClick={handleClearGaussianSplat} />
+          )}
         </PreviewBox>
-        {status === 'done' && plyUrl && (
-          <button
-            onClick={() => setIsFullscreen(true)}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#4a7a74]/20 px-3 py-1.5 text-xs text-[#7aaa9e] transition-colors hover:bg-[#4a7a74]/30"
-          >
-            <Maximize2 size={12} />
-            Fullscreen point cloud
-          </button>
-        )}
         <input
-          ref={fileInputRef}
+          ref={plyFileInputRef}
           type="file"
           accept=".ply"
           className="hidden"
-          onChange={handlePlyUpload}
+          onChange={handleSourcePlyUpload}
         />
-        {/* Depth Fusion Toggle */}
-        <div className="flex items-center justify-between rounded-md bg-zinc-700/30 px-2.5 py-1.5">
-          <div className="flex items-center gap-1.5">
-            <Layers size={11} className="text-zinc-400" />
-            <span className="text-[10px] text-zinc-300">Depth Fusion</span>
-          </div>
+        {status === 'done' && splatUrl && (
           <button
-            type="button"
-            role="switch"
-            aria-checked={enableDepthFusion}
-            disabled={status === 'processing'}
-            onClick={() => {
-              const newVal = !enableDepthFusion;
-              setEnableDepthFusion(newVal);
-              setNodes((nds) =>
-                nds.map((n) =>
-                  n.id === id
-                    ? { ...n, data: { ...n.data, enableDepthFusion: newVal } }
-                    : n
-                )
-              );
-            }}
-            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border border-zinc-600 transition-colors disabled:opacity-50 ${
-              enableDepthFusion ? 'bg-[#5a8a82]' : 'bg-zinc-700'
-            }`}
+            onClick={() => setIsFullscreen(true)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#6f5aa8]/20 px-3 py-1.5 text-xs text-[#c6b8ff] transition-colors hover:bg-[#6f5aa8]/30"
           >
-            <span
-              className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
-                enableDepthFusion ? 'translate-x-[14px]' : 'translate-x-[2px]'
-              } mt-[1px]`}
-            />
+            <Maximize2 size={12} />
+            Fullscreen splat
           </button>
-        </div>
-        {/* Segmentation Toggle */}
-        <div className="flex items-center justify-between rounded-md bg-zinc-700/30 px-2.5 py-1.5">
-          <div className="flex items-center gap-1.5">
-            <Scissors size={11} className="text-zinc-400" />
-            <span className="text-[10px] text-zinc-300">Segmentation</span>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enableSegmentation}
-            disabled={status === 'processing'}
-            onClick={() => {
-              const newVal = !enableSegmentation;
-              setEnableSegmentation(newVal);
-              setNodes((nds) =>
-                nds.map((n) =>
-                  n.id === id
-                    ? { ...n, data: { ...n.data, enableSegmentation: newVal } }
-                    : n
-                )
-              );
-            }}
-            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border border-zinc-600 transition-colors disabled:opacity-50 ${
-              enableSegmentation ? 'bg-[#5a8a82]' : 'bg-zinc-700'
-            }`}
-          >
-            <span
-              className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
-                enableSegmentation ? 'translate-x-[14px]' : 'translate-x-[2px]'
-              } mt-[1px]`}
-            />
-          </button>
-        </div>
-        {/* Layer Info */}
-        {enableSegmentation && (
-          <div className="rounded-md bg-zinc-700/20 px-2.5 py-1.5">
-            <div className="flex items-center gap-1 mb-1">
-              <Layers size={10} className="text-[#5a8a82]" />
-              <span className="text-[10px] text-[#5a8a82] font-medium">
-                {(data.layerFiles?.length || 0) > 0
-                  ? `${data.layerFiles.length} layer${data.layerFiles.length > 1 ? 's' : ''} detected`
-                  : 'No layers detected yet'}
-              </span>
-            </div>
-            {(data.layerFiles?.length || 0) > 0 ? (
-              <div className="flex flex-wrap gap-1">
-                {data.layerFiles.map((_, idx) => {
-                  const layerName = data.layerNames?.[idx] || `Layer ${idx + 1}`;
-                  return (
-                    <span
-                      key={idx}
-                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-medium"
-                      style={{
-                        backgroundColor: LAYER_DISPLAY_COLORS[idx % LAYER_DISPLAY_COLORS.length] + '30',
-                        color: LAYER_DISPLAY_COLORS[idx % LAYER_DISPLAY_COLORS.length],
-                        border: `1px solid ${LAYER_DISPLAY_COLORS[idx % LAYER_DISPLAY_COLORS.length]}40`,
-                      }}
-                    >
-                      <span
-                        className="inline-block h-1.5 w-1.5 rounded-full"
-                        style={{ backgroundColor: LAYER_DISPLAY_COLORS[idx % LAYER_DISPLAY_COLORS.length] }}
-                      />
-                      {layerName}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="text-[9px] leading-relaxed text-zinc-500">
-                Run point cloud generation with Segmentation enabled to split the PLY into layers.
-              </p>
-            )}
-          </div>
         )}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={status === 'processing'}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-slate-600/20 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:bg-slate-600/30 disabled:opacity-50"
+        {status === 'done' && gaussianCount !== null && gaussianCount > 0 && (
+          <p className="text-[10px] text-[#7f70c7]">
+            {gaussianCount.toLocaleString()} gaussians
+          </p>
+        )}
+        {status === 'done' && computeBackend && (
+          <p className="text-[10px] text-zinc-500">{computeBackend}</p>
+        )}
+        <div
+          className="nodrag nopan space-y-1.5 rounded-md bg-zinc-700/30 px-2.5 py-2"
+          onClickCapture={(event) => {
+            if (status === 'processing') return;
+            const grid = event.currentTarget.querySelector('[data-training-grid]');
+            if (!(grid instanceof HTMLElement)) return;
+            const rect = grid.getBoundingClientRect();
+            if (
+              event.clientX < rect.left ||
+              event.clientX > rect.right ||
+              event.clientY < rect.top ||
+              event.clientY > rect.bottom
+            ) {
+              return;
+            }
+            const segment = Math.min(10, Math.max(1, Math.floor(((event.clientX - rect.left) / rect.width) * 10) + 1));
+            const value = segment * 1000;
+            updateTrainingIterations(value);
+          }}
         >
-          <Upload size={12} />
-          Upload point cloud
-        </button>
+          <div className="flex items-center justify-between gap-2 rounded border border-zinc-700/70 bg-zinc-900/45 px-2 py-1.5">
+            <div className="min-w-0">
+              <span className="block text-[9px] uppercase tracking-wide text-zinc-500">Device</span>
+              <span className="font-mono text-[10px] text-zinc-200">{displayDeviceType}</span>
+            </div>
+            <div className="min-w-0 text-right">
+              <span className="block text-[9px] uppercase tracking-wide text-zinc-500">PLY target</span>
+              <span className="block truncate text-[10px] text-[#c6b8ff]">{displayTargetPlyType}</span>
+            </div>
+          </div>
+          {canChooseTrainingMode && (
+            <div className="grid grid-cols-2 overflow-hidden rounded border border-zinc-700 bg-zinc-900/70 text-[10px]">
+              <button
+                type="button"
+                disabled={status === 'processing'}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  updateTrainingMode('auto');
+                }}
+                className={`nodrag nopan px-2 py-1.5 transition-colors ${
+                  trainingMode === 'auto'
+                    ? 'bg-[#6f5aa8] text-white'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                } ${status === 'processing' ? 'cursor-not-allowed opacity-60' : ''}`}
+              >
+                Fast initializer
+              </button>
+              <button
+                type="button"
+                disabled={trueTrainingDisabled}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (trueTrainingDisabled) return;
+                  updateTrainingMode('train');
+                }}
+                className={`nodrag nopan border-l border-zinc-700 px-2 py-1.5 transition-colors ${
+                  trainingMode === 'train'
+                    ? 'bg-[#6f5aa8] text-white'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                } ${trueTrainingDisabled ? 'cursor-not-allowed opacity-45 hover:bg-transparent hover:text-zinc-400' : ''}`}
+              >
+                True training
+              </button>
+            </div>
+          )}
+          {canChooseTrainingMode && trueTrainingAvailable === false && (
+            <p className="text-[9px] leading-snug text-zinc-500">
+              True training unavailable: {trueTrainingReason}
+            </p>
+          )}
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-zinc-300">Training steps</span>
+            <span className="font-mono text-[10px] text-[#c6b8ff]">{trainingIterations.toLocaleString()}</span>
+          </div>
+          <div data-training-grid className="grid grid-cols-10 overflow-hidden rounded border border-zinc-600 bg-zinc-900">
+            {Array.from({ length: 10 }, (_, index) => {
+              const value = (index + 1) * 1000;
+              const active = value <= trainingIterations;
+              return (
+                <label
+                  key={value}
+                  aria-label={`${value} training steps`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  className={`nodrag nopan flex h-6 min-w-0 cursor-pointer items-center justify-center border-r border-zinc-700 last:border-r-0 transition-colors ${
+                    status === 'processing'
+                      ? 'cursor-not-allowed opacity-60'
+                      : active
+                        ? 'bg-[#6f5aa8]'
+                        : 'bg-zinc-800 hover:bg-zinc-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name={`${id}-training-iterations`}
+                    value={value}
+                    checked={trainingIterations === value}
+                    disabled={status === 'processing'}
+                    onChange={() => {
+                      updateTrainingIterations(value);
+                    }}
+                    className="sr-only"
+                  />
+                  <span className="block h-2 w-2 rounded-full bg-white/20" />
+                </label>
+              );
+            })}
+          </div>
+          <div className="flex justify-between font-mono text-[9px] text-zinc-500">
+            <span>1k</span>
+            <span>10k</span>
+          </div>
+        </div>
+        {splatUrl && (
+          <p className="text-[10px] leading-relaxed text-zinc-500">
+            Outputs and previews a 3DGS-compatible PLY.
+          </p>
+        )}
       </div>
-
-      {/* Fullscreen Dialog */}
-      {isFullscreen && plyUrl && (
+      {isFullscreen && splatUrl && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
           onClick={() => setIsFullscreen(false)}
@@ -1570,9 +2372,7 @@ export function PointCloudNode({ id, data }: NodeProps<PointCloudNodeData>) {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-zinc-700 px-4 py-3">
-              <span className="text-sm font-medium text-white">
-                Point Cloud - {pointCount?.toLocaleString()} pts
-              </span>
+              <span className="text-sm font-medium text-white">Gaussian Splat Preview</span>
               <button
                 onClick={() => setIsFullscreen(false)}
                 className="flex h-7 w-7 items-center justify-center rounded-md bg-zinc-700 text-zinc-300 transition-colors hover:bg-zinc-600"
@@ -1581,7 +2381,7 @@ export function PointCloudNode({ id, data }: NodeProps<PointCloudNodeData>) {
               </button>
             </div>
             <div className="h-[calc(85vh-52px)] w-full">
-              <PLYViewer plyUrl={plyUrl} className="h-full w-full" />
+              <SplatViewer splatUrl={splatUrl} className="h-full w-full" />
             </div>
           </div>
         </div>
@@ -1591,7 +2391,7 @@ export function PointCloudNode({ id, data }: NodeProps<PointCloudNodeData>) {
 }
 
 /* ====================================================================
-   4. Material Generation Node
+   5. Material Generation Node
    ==================================================================== */
 export function MaterialNode({ id, data }: NodeProps<MaterialNodeData>) {
   const { setNodes, getEdges } = useReactFlow();
@@ -1720,7 +2520,10 @@ export function MaterialNode({ id, data }: NodeProps<MaterialNodeData>) {
   }, [workflowRunning, status]);
 
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle('material', status)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="material" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'source', id: 'texture-output', label: 'Material', color: '#aa8a5a' },
@@ -1739,23 +2542,20 @@ export function MaterialNode({ id, data }: NodeProps<MaterialNodeData>) {
         <button
           onClick={handleConfirm}
           disabled={status === 'processing' || !textInput.trim()}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#7a6e4a]/20 px-3 py-1.5 text-xs text-[#9a8e6a] transition-colors hover:bg-[#7a6e4a]/30 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--node-accent-soft)] px-3 py-1.5 text-xs text-[var(--node-accent-text)] transition-colors hover:bg-[var(--node-accent-muted)] disabled:opacity-50"
         >
           {status === 'processing' ? (
             <>
-              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#6a6444] border-t-[#9a8e6a]" />
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--node-accent-muted)] border-t-[var(--node-accent-text)]" />
               Generating...
             </>
           ) : 'OK'}
         </button>
         {/* Texture preview */}
         <PreviewBox className="h-[80px]" placeholder="Material preview">
-          <div className="absolute left-1.5 top-1.5 z-10">
-            <StatusBadge status={status} />
-          </div>
           {status === 'processing' ? (
-            <div className="flex items-center gap-2 text-xs text-[#9a8e6a]">
-              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#6a6444] border-t-[#9a8e6a]" />
+            <div className="flex items-center gap-2 text-xs text-[var(--node-accent-text)]">
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--node-accent-muted)] border-t-[var(--node-accent-text)]" />
               Generating...
             </div>
           ) : textureUrl && status === 'done' ? (
@@ -1773,6 +2573,17 @@ export function MaterialNode({ id, data }: NodeProps<MaterialNodeData>) {
               )}
             </div>
           ) : null}
+          {textureUrl && status === 'done' && (
+            <PreviewDownloadIconButton
+              onClick={() => {
+                const ext = extFromPathname(textureUrl, '.png');
+                const name = buildPreviewDownloadFilename(data.label, id, ext);
+                void downloadFromUrl(textureUrl, name).catch(() => {
+                  /* download may fail on CORS */
+                });
+              }}
+            />
+          )}
         </PreviewBox>
       </div>
     </div>
@@ -1792,6 +2603,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
   const [isFullscreen, setIsFullscreen] = useState(data.isFullscreen || false);
   const [organizeStatus, setOrganizeStatus] = useState<'idle' | 'organizing' | 'done' | 'error'>(data.organizeStatus || 'idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
+  const [isUploading, setIsUploading] = useState(false);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -2006,6 +2818,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
       setOutputUrl(null);
       setOrganizeStatus('idle');
       setErrorMessage(null);
+      setIsUploading(true);
       setNodes((nds) =>
         nds.map((n) =>
           n.id === id
@@ -2028,11 +2841,13 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
         .then((result) => {
           if (!result.success) {
             setErrorMessage('Model upload failed: ' + (result.error || 'Unknown error'));
+            setIsUploading(false);
             return;
           }
           const serverUrl = result.url;
           const serverType = inferModelType(serverUrl) || detectedType;
           setModelUrl(serverUrl);
+          setIsUploading(false);
           setNodes((nds) =>
             nds.map((n) =>
               n.id === id
@@ -2044,10 +2859,46 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : 'Model upload failed';
           setErrorMessage(message);
+          setIsUploading(false);
         });
     },
     [id, setNodes, apiFetch]
   );
+
+  const handleClearModelOrganize = useCallback(() => {
+    if (organizeStatus === 'organizing' || isUploading) return;
+    for (const url of [modelUrl, outputUrl]) {
+      if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+    }
+    setModelUrl(null);
+    setOutputUrl(null);
+    setOutputType(null);
+    setOrganizeStatus('idle');
+    setErrorMessage(null);
+    setIsFullscreen(false);
+    setIsUploading(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                modelUrl: null,
+                outputUrl: null,
+                outputType: null,
+                organizeStatus: 'idle' as const,
+                errorMessage: null,
+                layerFiles: [] as string[],
+                layerNames: [] as string[],
+                layerGlbUrls: [] as string[],
+              },
+            }
+          : n
+      )
+    );
+  }, [id, isUploading, modelUrl, organizeStatus, outputUrl, setNodes]);
 
   // Push organized model to downstream when outputUrl changes and organizing is done
   useEffect(() => {
@@ -2083,7 +2934,10 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
   const previewType = outputType || (modelUrl ? inferModelType(modelUrl) : null);
 
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle('modelOrganize', organizeStatus === 'organizing' ? 'processing' : organizeStatus)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="modelOrganize" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'obj-input', label: 'Model', color: '#7a4a55' },
@@ -2092,7 +2946,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
       <div className="p-3 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[10px] text-zinc-400">
-            {organizeStatus === 'organizing' ? 'Cleaning up...' : previewUrl ? ((previewType?.toUpperCase() || '') + ' Model') : 'Model Cleanup Preview'}
+            {isUploading ? 'Uploading...' : organizeStatus === 'organizing' ? 'Cleaning up...' : previewUrl ? ((previewType?.toUpperCase() || '') + ' Model') : 'Model Cleanup Preview'}
           </span>
           <div className="flex items-center gap-1">
             {organizeStatus === 'organizing' && <StatusBadge status="processing" />}
@@ -2115,10 +2969,8 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
           onClick={handlePreviewClick}
         >
           {!previewUrl ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-500">
+            <div className="flex h-full items-center justify-center text-zinc-600">
               <Upload size={24} />
-              <span className="text-xs">Click to upload or receive from upstream</span>
-              <span className="text-[10px] text-zinc-600">Supports .glb .fbx .obj .ply</span>
             </div>
           ) : (
             <ModelViewer
@@ -2134,6 +2986,21 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
                 Blender cleaning up...
               </div>
             </div>
+          )}
+          {previewUrl && organizeStatus !== 'organizing' && !isUploading && (
+            <PreviewDownloadIconButton
+              onClick={() => {
+                const ext =
+                  previewType != null ? `.${previewType}` : extFromPathname(previewUrl, '.glb');
+                const name = buildPreviewDownloadFilename(data.label, id, ext);
+                void downloadFromUrl(previewUrl, name).catch(() => {
+                  /* download may fail on CORS */
+                });
+              }}
+            />
+          )}
+          {previewUrl && organizeStatus !== 'organizing' && !isUploading && (
+            <PreviewClearIconButton onClick={handleClearModelOrganize} />
           )}
         </div>
 
@@ -2330,7 +3197,14 @@ export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) 
   }, []);
 
   return (
-    <div style={{ width: VIDEO_PREVIEW_NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle(
+        'videoPreview',
+        videoGenerating ? 'processing' : errorMessage ? 'error' : videoUrl ? 'done' : 'idle',
+        VIDEO_PREVIEW_NODE_WIDTH
+      )}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="videoPreview" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'obj-input', label: 'Model', color: '#7a4a55' },
@@ -2348,14 +3222,31 @@ export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) 
                 className="h-full w-full object-contain"
                 style={{ backgroundColor: '#09090b' }}
               />
-              {/* Fullscreen play button - bottom right */}
-              <button
-                onClick={handleFullscreenDialogClick}
-                className="absolute right-1.5 bottom-1.5 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-zinc-200 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-black/80 [div:hover>&]:opacity-100"
-                title="Fullscreen"
-              >
-                <Maximize2 size={12} />
-              </button>
+              <div className="pointer-events-none absolute right-1.5 bottom-1.5 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 [div:hover>&]:opacity-100">
+                <button
+                  type="button"
+                  title="Download"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const ext = extFromPathname(videoUrl, '.mp4');
+                    const name = buildPreviewDownloadFilename(data.label, id, ext);
+                    void downloadFromUrl(videoUrl, name).catch(() => {
+                      /* download may fail on CORS */
+                    });
+                  }}
+                  className="nodrag nopan pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-zinc-200 transition-colors hover:bg-black/80"
+                >
+                  <Download size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleFullscreenDialogClick}
+                  className="nodrag nopan pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-zinc-200 transition-colors hover:bg-black/80"
+                  title="Fullscreen"
+                >
+                  <Maximize2 size={12} />
+                </button>
+              </div>
             </>
           ) : modelUrl ? (
             <div className="flex h-full flex-col items-center justify-center gap-2">
@@ -3072,6 +3963,70 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
     objFileInputRef.current?.click();
   }, []);
 
+  const handleClearSurfacePreview = useCallback(() => {
+    if (blenderProcessing || previewMergeBusy || isUploading) return;
+    autoBlenderAbortRef.current?.abort();
+    for (const u of previewBlobRevokeQueueRef.current) {
+      if (typeof u === 'string' && u.startsWith('blob:')) scheduleRevokeBlobUrl(u);
+    }
+    previewBlobRevokeQueueRef.current = [];
+    for (const url of mergeCacheRef.current.entries.values()) {
+      if (url.startsWith('blob:')) scheduleRevokeBlobUrl(url);
+    }
+    mergeCacheRef.current = { fp: '', entries: new Map() };
+    if (previewBlobUrl?.startsWith('blob:')) scheduleRevokeBlobUrl(previewBlobUrl);
+    if (data.modelUrl?.startsWith('blob:')) scheduleRevokeBlobUrl(data.modelUrl);
+    if (data.outputModelUrl?.startsWith('blob:')) scheduleRevokeBlobUrl(data.outputModelUrl);
+    setPreviewBlobUrl(null);
+    setPreviewMergeBusy(false);
+    setSelectedLayer(null);
+    setDetectedLayers([]);
+    setLayerParams({});
+    setBlenderProcessing(false);
+    setBlenderError(null);
+    setObjFileName(null);
+    setIsUploading(false);
+    setIsFullscreen(false);
+    prevUpstreamGlbKeyRef.current = '';
+    if (objFileInputRef.current) objFileInputRef.current.value = '';
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                modelUrl: null,
+                outputModelUrl: null,
+                outputModelType: null,
+                selectedLayer: null,
+                blenderProcessing: false,
+                blenderError: null,
+                renderUrl: null,
+                layerFiles: [] as string[],
+                layerNames: [] as string[],
+                layerGlbUrls: [] as string[],
+                layerUrlA: {} as Record<string, string>,
+                layerUrlB: {} as Record<string, string>,
+                layerUrlC: {} as Record<string, string>,
+                layerParams: {} as Record<string, MaterialParams>,
+              },
+            }
+          : n
+      )
+    );
+  }, [
+    blenderProcessing,
+    data.modelUrl,
+    data.outputModelUrl,
+    id,
+    isUploading,
+    previewBlobUrl,
+    previewMergeBusy,
+    scheduleRevokeBlobUrl,
+    setNodes,
+  ]);
+
   // Handle texture file upload
   const handleTextureUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3401,7 +4356,13 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
   const surfaceControlsLocked = blenderProcessing || previewMergeBusy;
 
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle(
+        'modelSurface',
+        blenderProcessing || previewMergeBusy ? 'processing' : blenderError ? 'error' : data.outputModelUrl ? 'done' : 'idle'
+      )}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="modelSurface" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'obj-input', label: 'Model', color: '#7a4a55' },
@@ -3508,22 +4469,25 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
               processing={blenderProcessing}
               processingText="Blender rendering..."
               lightParams={lightParams}
+              previewMaterialParams={selectedLayer ? currentParams : null}
+              previewMaterialLayer={selectedLayer}
               metadataLayerNames={data.layerNames && data.layerNames.length > 0 ? data.layerNames : undefined}
               onSuccessfulModelLoad={handlePreviewGlbLoadSuccess}
             />
           ) : (
             <div
-              className={`flex h-full flex-col items-center justify-center gap-2 transition-colors ${surfaceControlsLocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:border-[#5a7068]/50'}`}
+              className={`flex h-full items-center justify-center transition-colors ${surfaceControlsLocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:border-[#5a7068]/50'}`}
               onClick={(e) => {
                 e.stopPropagation();
                 if (surfaceControlsLocked) return;
                 handlePreviewPlaceholderClick();
               }}
             >
-              <Upload size={24} className="text-zinc-500" />
-              <span className="text-xs text-zinc-500">Click to upload model</span>
-              <span className="text-[10px] text-zinc-600">Select MTL/texture companion files together</span>
+              <Upload size={24} className="text-zinc-600" />
             </div>
+          )}
+          {previewModelUrl && !surfaceControlsLocked && !isUploading && (
+            <PreviewClearIconButton onClick={handleClearSurfacePreview} />
           )}
         </div>
 
@@ -3787,6 +4751,8 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
               processing={blenderProcessing}
               processingText="Blender rendering..."
               lightParams={lightParams}
+              previewMaterialParams={selectedLayer ? currentParams : null}
+              previewMaterialLayer={selectedLayer}
               metadataLayerNames={data.layerNames && data.layerNames.length > 0 ? data.layerNames : undefined}
               onSuccessfulModelLoad={handlePreviewGlbLoadSuccess}
             />
@@ -3808,22 +4774,24 @@ function ParamRow({ label, children }: { label: string; children: React.ReactNod
 }
 
 /* ====================================================================
-   8. 3DGS Model Generation Node
+   9. Mesh Generation Node
    ==================================================================== */
 export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeData>) {
   const { setNodes, getEdges } = useReactFlow();
   const { workflowRunning, apiFetch, ephemeralSessionId } = useWorkflow();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(data.modelUrl);
-  const [inputType, setInputType] = useState<'ply' | 'obj' | 'glb' | null>(data.inputType);
+  const [inputType, setInputType] = useState<'ply' | 'obj' | 'glb' | 'splat' | null>(data.inputType);
   const [outputUrl, setOutputUrl] = useState<string | null>(data.outputUrl);
-  const [outputType, setOutputType] = useState<'glb' | 'fbx' | 'obj' | 'ply' | null>(data.outputType);
+  const [outputType, setOutputType] = useState<'glb' | 'fbx' | 'obj' | 'ply' | 'splat' | null>(data.outputType);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [textureUrl, setTextureUrl] = useState<string | null>(data.textureUrl);
   const [meshStatus, setMeshStatus] = useState<'idle' | 'processing' | 'done' | 'error'>(data.meshStatus || 'idle');
   const [outputFormat, setOutputFormat] = useState<'glb' | 'obj' | 'ply'>(data.outputFormat || 'glb');
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
   const [faceCount, setFaceCount] = useState<number | null>(data.faceCount);
+  const [gaussianCount, setGaussianCount] = useState<number | null>(data.gaussianCount);
+  const [computeBackend, setComputeBackend] = useState<string | null>(data.computeBackend);
   const [renderUrl, setRenderUrl] = useState<string | null>(data.renderUrl);
   const [isUploading, setIsUploading] = useState(false);
   const [lightParams, setLightParams] = useState<LightParams | null>(data.lightParams || null);
@@ -3875,15 +4843,22 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     if (data.faceCount !== faceCount) {
       setFaceCount(data.faceCount);
     }
+    if (data.gaussianCount !== gaussianCount) {
+      setGaussianCount(data.gaussianCount);
+    }
+    if (data.computeBackend !== computeBackend) {
+      setComputeBackend(data.computeBackend);
+    }
     if (data.lightParams && data.lightParams !== lightParams) {
       setLightParams(data.lightParams);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.modelUrl, data.inputType, data.textureUrl, data.meshStatus, data.outputUrl, data.outputType, data.errorMessage, data.faceCount, data.lightParams]);
+  }, [data.modelUrl, data.inputType, data.textureUrl, data.meshStatus, data.outputUrl, data.outputType, data.errorMessage, data.faceCount, data.gaussianCount, data.computeBackend, data.lightParams]);
 
   // Push model output to downstream nodes when mesh generation is done
   useEffect(() => {
     if (meshStatus === 'done' && outputUrl) {
+      if (outputType === 'splat') return;
       const edges = getEdges();
       const downstreamEdges = edges.filter(
         (edge) => edge.source === id && edge.sourceHandle === 'output'
@@ -3933,7 +4908,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meshStatus, outputUrl, layerGlbUrls, data.layerNames, data.layerFiles]);
+  }, [meshStatus, outputUrl, outputType, layerGlbUrls, data.layerNames, data.layerFiles]);
 
   // History: once per new output URL. Assets: terminal GLB only, re-evaluated when edges change
   // (separate refs so disconnecting downstream can still publish the same URL to the library).
@@ -3942,7 +4917,8 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
   useEffect(() => {
     if (meshStatus !== 'done' || !outputUrl || isBlobUrl(outputUrl)) return;
 
-    const sourceLabel = inputType === 'ply' ? 'PLY to Mesh' : inputType === 'glb' ? 'GLB Processing' : 'OBJ Processing';
+    const sourceLabel = inputType === 'splat' ? 'Gaussian Splat' : inputType === 'ply' ? 'PLY to Mesh' : inputType === 'glb' ? 'GLB Processing' : 'OBJ Processing';
+    const thumbnailUrl = renderUrl || data.renderUrl || null;
 
     if (outputUrl !== lastHistoryModelUrl.current) {
       lastHistoryModelUrl.current = outputUrl;
@@ -3950,6 +4926,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
         name: `${sourceLabel}_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
         modelUrl: outputUrl,
         modelType: outputType || null,
+        thumbnailUrl,
         sourceNode: 'modelGeneration',
       });
     }
@@ -3963,11 +4940,11 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
         assetType: 'model',
         fileUrl: outputUrl,
         fileType: 'glb',
-        thumbnailUrl: null,
+        thumbnailUrl,
         sourceNode: 'modelGeneration',
       });
     }
-  }, [meshStatus, outputUrl, outputType, inputType, id, getEdges]);
+  }, [meshStatus, outputUrl, outputType, inputType, renderUrl, data.renderUrl, id, getEdges]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -4046,6 +5023,54 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     fileInputRef.current?.click();
   }, []);
 
+  const handleClearMeshPreview = useCallback(() => {
+    if (meshStatus === 'processing' || isUploading) return;
+    for (const url of [modelUrl, outputUrl, renderUrl, textureUrl]) {
+      if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+    }
+    setModelUrl(null);
+    setInputType(null);
+    setOutputUrl(null);
+    setOutputType(null);
+    setTextureUrl(null);
+    setMeshStatus('idle');
+    setErrorMessage(null);
+    setFaceCount(null);
+    setGaussianCount(null);
+    setComputeBackend(null);
+    setRenderUrl(null);
+    setLayerGlbUrls([]);
+    setIsUploading(false);
+    setIsFullscreen(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                modelUrl: null,
+                inputType: null,
+                outputUrl: null,
+                outputType: null,
+                textureUrl: null,
+                meshStatus: 'idle' as const,
+                errorMessage: null,
+                faceCount: null,
+                gaussianCount: null,
+                computeBackend: null,
+                renderUrl: null,
+                layerFiles: [] as string[],
+                layerNames: [] as string[],
+                layerGlbUrls: [] as string[],
+              },
+            }
+          : n
+      )
+    );
+  }, [id, isUploading, meshStatus, modelUrl, outputUrl, renderUrl, setNodes, textureUrl]);
+
   const handleFormatChange = useCallback(
     (format: 'glb' | 'obj' | 'ply') => {
       setOutputFormat(format);
@@ -4071,9 +5096,14 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       return;
     }
 
+    const requestedOutputFormat = inputType === 'splat' ? 'glb' : outputFormat;
+    if (inputType === 'splat' && outputFormat !== 'glb') {
+      setOutputFormat('glb');
+    }
+
     const useLayerPlys =
       (data.layerFiles?.length ?? 0) > 0 &&
-      outputFormat === 'glb' &&
+      requestedOutputFormat === 'glb' &&
       (inputType === 'ply' || (modelUrl && modelUrl.toLowerCase().split('?')[0].endsWith('.ply')));
 
     if (useLayerPlys) {
@@ -4187,7 +5217,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     apiFetch('/api/generate-mesh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plyUrl: modelUrl, outputFormat, ephemeralSessionId }),
+      body: JSON.stringify({ plyUrl: modelUrl, outputFormat: requestedOutputFormat, ephemeralSessionId }),
     })
       .then((res) => res.json())
       .then((result) => {
@@ -4216,12 +5246,19 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
               } else if (task.status === 'done' && task.result) {
                 const { meshUrl, meshFormat, faceCount: fc } = task.result;
                 const resolvedType = meshFormat as 'glb' | 'obj' | 'ply';
+                const nextInputType = inputType === 'splat'
+                  ? 'splat' as const
+                  : resolvedType === 'ply'
+                    ? 'ply' as const
+                    : resolvedType === 'glb'
+                      ? 'glb' as const
+                      : 'obj' as const;
                 setLayerGlbUrls([]);
                 setMeshStatus('done');
                 setOutputUrl(meshUrl);
                 setOutputType(resolvedType);
                 setModelUrl(meshUrl);
-                setInputType(resolvedType === 'ply' ? 'ply' : resolvedType === 'glb' ? 'glb' : 'obj');
+                setInputType(nextInputType);
                 setFaceCount(fc);
                 setErrorMessage(null);
                 setNodes((nds) =>
@@ -4233,7 +5270,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                             ...n.data,
                             meshStatus: 'done' as const,
                             modelUrl: meshUrl,
-                            inputType: resolvedType === 'ply' ? 'ply' : resolvedType === 'glb' ? 'glb' : 'obj',
+                            inputType: nextInputType,
                             outputUrl: meshUrl,
                             outputType: resolvedType,
                             faceCount: fc,
@@ -4412,6 +5449,9 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     if (inputType === 'ply') {
       // PLY input → generate mesh (no PNG dependency)
       handleGenerateMesh();
+    } else if (inputType === 'splat') {
+      // Splat input → convert Gaussian centers to GLB mesh for downstream Blender/model nodes.
+      handleGenerateMesh();
     } else if (inputType === 'obj' || inputType === 'glb') {
       // OBJ/GLB input → needs texture (PNG) if connected
       if (textureEdge && !textureUrl) return; // Wait for PNG
@@ -4437,8 +5477,13 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowRunning, modelUrl, inputType, textureUrl, meshStatus]);
 
+  const viewerModelType = outputType === 'splat' ? null : outputType;
+
   return (
-    <div style={{ width: NODE_WIDTH }} className="rounded-lg border border-zinc-700 bg-zinc-800 shadow-lg">
+    <div
+      style={getNodeFrameStyle('modelGeneration', meshStatus)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
       <NodeHeader type="modelGeneration" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'model-input', label: 'Model', color: '#7a4a55' },
@@ -4448,7 +5493,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       <div className="p-3 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[10px] text-zinc-400">
-            {outputUrl ? (outputType?.toUpperCase() + ' Model') : '3DGS Model Preview'}
+            {outputUrl ? (outputType === 'splat' ? 'SPLAT Source' : outputType?.toUpperCase() + ' Model') : 'Mesh Preview'}
           </span>
           <div className="flex items-center gap-1">
             {meshStatus === 'processing' && <StatusBadge status="processing" />}
@@ -4471,15 +5516,24 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           onClick={handlePreviewClick}
         >
           {!outputUrl && !renderUrl ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-500">
+            <div className="flex h-full items-center justify-center text-zinc-600">
               <Upload size={24} />
-              <span className="text-xs">Click to upload or generate mesh from input</span>
-              <span className="text-[10px] text-zinc-600">Supports .glb .fbx .obj .ply</span>
+            </div>
+          ) : outputUrl && outputType === 'splat' ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+              <Sparkles size={28} className="text-[#b9a7ff]" />
+              <span className="text-[11px] font-medium text-[#c6b8ff]">3D Gaussian splat ready</span>
+              <span className="text-[10px] text-zinc-400">
+                {gaussianCount ? `${gaussianCount.toLocaleString()} gaussians` : '3DGS PLY'}
+              </span>
+              {computeBackend && (
+                <span className="text-[10px] text-zinc-500">{computeBackend}</span>
+              )}
             </div>
           ) : outputUrl ? (
             <ModelViewer
               modelUrl={outputUrl}
-              modelType={outputType}
+              modelType={viewerModelType}
               className="h-full w-full"
             />
           ) : renderUrl && meshStatus === 'done' ? (
@@ -4494,7 +5548,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
             <div className="absolute inset-0 flex items-center justify-center bg-zinc-900/70 z-10">
               <div className="flex items-center gap-2 text-xs text-[#9a6a74]">
                 <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#7a4a55] border-t-[#9a6a74]" />
-                Generating mesh...
+                {inputType === 'splat' ? 'Converting splat to GLB...' : 'Generating mesh...'}
               </div>
             </div>
           )}
@@ -4505,6 +5559,27 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                 File uploading...
               </div>
             </div>
+          )}
+          {(outputUrl || renderUrl) && meshStatus !== 'processing' && !isUploading && (
+            <PreviewDownloadIconButton
+              onClick={() => {
+                const url = outputUrl ?? renderUrl!;
+                const ext = outputUrl
+                  ? outputType === 'splat'
+                    ? '.ply'
+                    : outputType != null
+                    ? `.${outputType}`
+                    : extFromPathname(outputUrl, '.glb')
+                  : extFromPathname(renderUrl!, '.png');
+                const name = buildPreviewDownloadFilename(data.label, id, ext);
+                void downloadFromUrl(url, name).catch(() => {
+                  /* download may fail on CORS */
+                });
+              }}
+            />
+          )}
+          {(modelUrl || outputUrl || renderUrl) && meshStatus !== 'processing' && !isUploading && (
+            <PreviewClearIconButton onClick={handleClearMeshPreview} />
           )}
         </div>
 
@@ -4548,6 +5623,17 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           </div>
         )}
 
+        {modelUrl && inputType === 'splat' && (
+          <button
+            onClick={handleGenerateMesh}
+            disabled={meshStatus === 'processing' || isUploading}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#6f5aa8]/20 px-3 py-1.5 text-xs text-[#c6b8ff] transition-colors hover:bg-[#6f5aa8]/30 disabled:opacity-50"
+          >
+            <Box size={12} />
+            {meshStatus === 'processing' ? 'Converting...' : meshStatus === 'done' && outputUrl ? 'Regenerate GLB' : 'Convert Splat to GLB'}
+          </button>
+        )}
+
         {/* Process OBJ/GLB + PNG: texture extraction, UV completion, metadata, rendering */}
         {modelUrl && (inputType === 'obj' || inputType === 'glb') && textureUrl && (
           <button
@@ -4557,18 +5643,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           >
             <Layers size={12} />
             {meshStatus === 'processing' ? 'Processing...' : meshStatus === 'done' && renderUrl ? 'Re-process' : inputType === 'glb' ? 'Process GLB' : 'Process OBJ'}
-          </button>
-        )}
-
-        {/* Upload button when no inputs */}
-        {!modelUrl && (
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#7a4a55]/20 px-3 py-1.5 text-xs text-[#9a6a74] transition-colors hover:bg-[#7a4a55]/30 disabled:opacity-50"
-          >
-            <Upload size={12} />
-            {isUploading ? 'Uploading...' : 'Upload 3D Model'}
           </button>
         )}
 
@@ -4586,6 +5660,11 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
         {renderUrl && meshStatus === 'done' && (
           <p className="text-[10px] text-[#5a8a6a]">
             Render generated
+          </p>
+        )}
+        {modelUrl && inputType === 'splat' && meshStatus !== 'processing' && (
+          <p className="text-[10px] text-[#7f70c7]">
+            Ready (Splat → GLB)
           </p>
         )}
         {modelUrl && inputType === 'ply' && !outputUrl && meshStatus !== 'processing' && plyMeshInputsReady && (
@@ -4622,7 +5701,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           >
             <div className="flex items-center justify-between border-b border-zinc-700 px-4 py-3">
               <span className="text-sm font-medium text-white">
-                3DGS Model Preview - {renderUrl ? 'Render' : outputType?.toUpperCase()}
+                Mesh Preview - {renderUrl ? 'Render' : outputType === 'splat' ? 'SPLAT' : outputType?.toUpperCase()}
               </span>
               <button
                 onClick={() => setIsFullscreen(false)}
@@ -4639,10 +5718,21 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                   className="h-full w-full object-contain"
                   draggable={false}
                 />
+              ) : outputUrl && outputType === 'splat' ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                  <Sparkles size={42} className="text-[#b9a7ff]" />
+                  <span className="text-sm font-medium text-[#c6b8ff]">3D Gaussian splat asset</span>
+                  <span className="text-xs text-zinc-400">
+                    {gaussianCount ? `${gaussianCount.toLocaleString()} gaussians` : '3DGS-compatible PLY'}
+                  </span>
+                  {computeBackend && (
+                    <span className="text-xs text-zinc-500">{computeBackend}</span>
+                  )}
+                </div>
               ) : outputUrl ? (
                 <ModelViewer
                   modelUrl={outputUrl}
-                  modelType={outputType}
+                  modelType={viewerModelType}
                   className="h-full w-full"
                   lightParams={lightParams || undefined}
                 />

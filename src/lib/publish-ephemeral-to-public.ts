@@ -1,5 +1,5 @@
 import path from 'path';
-import { copyFile, mkdir } from 'fs/promises';
+import { copyFile, mkdir, writeFile } from 'fs/promises';
 import { parseEphemeralFileUrl, ephemeralFileAbsPath } from '@/lib/ephemeral-storage';
 
 const publicRoot = () => path.join(process.cwd(), 'public');
@@ -13,6 +13,19 @@ export async function publishUrlToPublicIfEphemeral(
   assetId: string,
 ): Promise<string | null> {
   if (!url) return null;
+
+  const dataUrlMatch = /^data:image\/(png|jpe?g|webp);base64,(.+)$/i.exec(url);
+  if (dataUrlMatch) {
+    const imageType = dataUrlMatch[1].toLowerCase();
+    const ext = imageType === 'jpeg' || imageType === 'jpg' ? 'jpg' : imageType;
+    const destDir = path.join(publicRoot(), 'asset-published', assetId);
+    await mkdir(destDir, { recursive: true });
+    const fileName = `thumbnail.${ext}`;
+    const dest = path.join(destDir, fileName);
+    await writeFile(dest, Buffer.from(dataUrlMatch[2], 'base64'));
+    return `/asset-published/${assetId}/${fileName}`;
+  }
+
   const parsed = parseEphemeralFileUrl(url);
   if (!parsed) return url;
 

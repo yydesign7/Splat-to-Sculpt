@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import { mkdir, rm, readdir, copyFile, readFile, stat } from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { setTask } from '@/lib/pointcloud-task-store';
+import { getTask, setTask } from '@/lib/pointcloud-task-store';
 import { checkSystemCommand } from '@/lib/check-python-deps';
 import {
   buildEphemeralFileUrl,
@@ -12,8 +12,92 @@ import {
   isValidEphemeralSessionId,
   resolveClientMediaUrlToFilesystem,
 } from '@/lib/ephemeral-storage';
+import { killProcessTree } from '@/lib/process-tree';
 
 const execFileAsync = promisify(execFile);
+
+async function ensurePointCloudNotCancelled(taskId: string): Promise<void> {
+  const task = await getTask(taskId);
+  if (task?.status === 'cancelled') {
+    throw new Error('Point cloud generation was cancelled');
+  }
+}
+
+function runTrackedCommand(
+  taskId: string,
+  command: string,
+  args: string[],
+  options: { timeout?: number; cwd?: string } = {},
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+
+    if (typeof child.pid === 'number') {
+      setTask(taskId, { activePid: child.pid }).catch(() => {});
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = options.timeout
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          if (typeof child.pid === 'number') {
+            killProcessTree(child.pid).catch(() => {});
+          } else {
+            child.kill('SIGTERM');
+          }
+          const err = new Error(`${command} timed out`) as Error & { stdout?: string; stderr?: string };
+          err.stdout = stdout;
+          err.stderr = stderr;
+          reject(err);
+        }, options.timeout)
+      : null;
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (stdout.length > 200_000) stdout = stdout.slice(-200_000);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > 200_000) stderr = stderr.slice(-200_000);
+    });
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      if (settled) return;
+      if (timer) clearTimeout(timer);
+      setTask(taskId, { activePid: undefined }).catch(() => {});
+      const enriched = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+      enriched.stdout = stdout;
+      enriched.stderr = stderr;
+      settled = true;
+      reject(enriched);
+    });
+    child.on('close', async (code) => {
+      if (settled) return;
+      if (timer) clearTimeout(timer);
+      await setTask(taskId, { activePid: undefined }).catch(() => {});
+      settled = true;
+      const latest = await getTask(taskId);
+      if (latest?.status === 'cancelled') {
+        reject(new Error('Point cloud generation was cancelled'));
+        return;
+      }
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const err = new Error(`${command} exited with code ${code}`) as Error & { stdout?: string; stderr?: string };
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+  });
+}
 
 /** Detect whether a CUDA-capable GPU is available (for COLMAP GPU mode) */
 async function hasGpu(): Promise<boolean> {
@@ -34,11 +118,20 @@ async function hasGpu(): Promise<boolean> {
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { framePaths, enableDepthFusion = true, enableSegmentation = true, ephemeralSessionId } = body as {
+  const {
+    framePaths,
+    enableDepthFusion = true,
+    enableSegmentation = true,
+    ephemeralSessionId,
+    preserveColmapWorkspace = false,
+    colmapOnly = false,
+  } = body as {
     framePaths?: string[];
     enableDepthFusion?: boolean;
     enableSegmentation?: boolean;
     ephemeralSessionId?: string;
+    preserveColmapWorkspace?: boolean;
+    colmapOnly?: boolean;
   };
 
   if (!framePaths || framePaths.length === 0) {
@@ -65,7 +158,7 @@ export async function POST(request: NextRequest) {
   });
 
   // Run the heavy COLMAP + depth processing asynchronously
-  runPipeline(taskId, framePaths, enableDepthFusion, enableSegmentation, ephemeralSessionId).catch(() => {});
+  runPipeline(taskId, framePaths, enableDepthFusion, enableSegmentation, ephemeralSessionId, preserveColmapWorkspace, colmapOnly).catch(() => {});
 
   // Return the task ID immediately so the client can poll for progress
   return NextResponse.json({
@@ -107,7 +200,11 @@ async function runPatchMatchStereo(
 
     const child = spawn('colmap', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
+    if (typeof child.pid === 'number') {
+      setTask(taskId, { activePid: child.pid }).catch(() => {});
+    }
 
     let lastReportedFrame = -1;
 
@@ -141,7 +238,13 @@ async function runPatchMatchStereo(
       }
     });
 
-    child.on('close', (code: number) => {
+    child.on('close', async (code: number) => {
+      await setTask(taskId, { activePid: undefined }).catch(() => {});
+      const latest = await getTask(taskId);
+      if (latest?.status === 'cancelled') {
+        reject(new Error('Point cloud generation was cancelled'));
+        return;
+      }
       if (code === 0) {
         resolve();
       } else {
@@ -161,9 +264,12 @@ async function runPipeline(
   enableDepthFusion: boolean,
   enableSegmentation: boolean,
   ephemeralSessionId: string,
+  preserveColmapWorkspace: boolean,
+  colmapOnly: boolean,
 ) {
   let workDir = '';
   try {
+    await ensurePointCloudNotCancelled(taskId);
     const pointcloudJobId = randomUUID();
     workDir = path.join('/tmp', `pointcloud_${pointcloudJobId}`);
     const imagesDir = path.join(workDir, 'images');
@@ -206,7 +312,7 @@ async function runPipeline(
     const databasePath = path.join(workDir, 'database.db');
     await setTask(taskId, { progress: 'Extracting features...', progressStep: 2 });
 
-    await execFileAsync('colmap', [
+    await runTrackedCommand(taskId, 'colmap', [
       'feature_extractor',
       '--database_path', databasePath,
       '--image_path', imagesDir,
@@ -218,18 +324,27 @@ async function runPipeline(
 
     // ── Step 3: Feature Matching ────────────────────────────────────
     await setTask(taskId, { progress: 'Feature matching...', progressStep: 3 });
-    await execFileAsync('colmap', [
-      useGpu ? 'exhaustive_matcher' : 'exhaustive_matcher',
-      '--database_path', databasePath,
-      '--SiftMatching.use_gpu', useGpu ? '1' : '0',
-    ], { timeout: 600000 });
+    const matcherArgs = colmapOnly
+      ? [
+          'sequential_matcher',
+          '--database_path', databasePath,
+          '--SiftMatching.use_gpu', useGpu ? '1' : '0',
+          '--SequentialMatching.overlap', '10',
+          '--SequentialMatching.loop_detection', '0',
+        ]
+      : [
+          'exhaustive_matcher',
+          '--database_path', databasePath,
+          '--SiftMatching.use_gpu', useGpu ? '1' : '0',
+        ];
+    await runTrackedCommand(taskId, 'colmap', matcherArgs, { timeout: 600000 });
 
     // ── Step 4: Sparse Reconstruction ───────────────────────────────
     await setTask(taskId, { progress: 'Sparse reconstruction...', progressStep: 4 });
     const sparseOutputDir = path.join(sparseDir, '0');
     await mkdir(sparseOutputDir, { recursive: true });
 
-    await execFileAsync('colmap', [
+    await runTrackedCommand(taskId, 'colmap', [
       'mapper',
       '--database_path', databasePath,
       '--image_path', imagesDir,
@@ -242,11 +357,25 @@ async function runPipeline(
       '--Mapper.tri_merge_max_reproj_error', '4',
     ], { timeout: 600000 });
 
+    if (colmapOnly) {
+      await fallbackToSparsePly(
+        taskId,
+        sparseOutputDir,
+        pointcloudJobId,
+        workDir,
+        false,
+        false,
+        ephemeralSessionId,
+        preserveColmapWorkspace,
+      );
+      return;
+    }
+
     // ── Step 5: Image Undistortion (dense reconstruction prerequisite) ─
     await setTask(taskId, { progress: 'Undistorting images...', progressStep: 5 });
     await mkdir(denseDir, { recursive: true });
 
-    await execFileAsync('colmap', [
+    await runTrackedCommand(taskId, 'colmap', [
       'image_undistorter',
       '--image_path', imagesDir,
       '--input_path', sparseOutputDir,
@@ -283,6 +412,7 @@ async function runPipeline(
         enableSegmentation,
         enableDepthFusion,
         ephemeralSessionId,
+        preserveColmapWorkspace,
       );
       return;
     }
@@ -292,7 +422,7 @@ async function runPipeline(
 
     const fusedPlyPath = path.join(denseDir, 'fused.ply');
     try {
-      await execFileAsync('colmap', [
+      await runTrackedCommand(taskId, 'colmap', [
         'stereo_fusion',
         '--workspace_path', denseDir,
         '--workspace_format', 'COLMAP',
@@ -313,6 +443,7 @@ async function runPipeline(
         enableSegmentation,
         enableDepthFusion,
         ephemeralSessionId,
+        preserveColmapWorkspace,
       );
       return;
     }
@@ -336,6 +467,7 @@ async function runPipeline(
         enableSegmentation,
         enableDepthFusion,
         ephemeralSessionId,
+        preserveColmapWorkspace,
       );
       return;
     }
@@ -346,7 +478,7 @@ async function runPipeline(
 
       const scriptPath = path.join(process.cwd(), 'scripts', 'depth_estimate.py');
       try {
-        const { stdout, stderr } = await execFileAsync('python3', [
+        const { stdout, stderr } = await runTrackedCommand(taskId, 'python3', [
           scriptPath,
           '--images_dir', imagesDir,
           '--output_dir', depthDir,
@@ -372,7 +504,7 @@ async function runPipeline(
         const mergedPlyPath = path.join(workDir, 'merged.ply');
 
         try {
-          const { stdout: fusionStdout, stderr: fusionStderr } = await execFileAsync('python3', [
+          const { stdout: fusionStdout, stderr: fusionStderr } = await runTrackedCommand(taskId, 'python3', [
             fusionScriptPath,
             '--sparse_dir', sparseOutputDir,
             '--images_dir', imagesDir,
@@ -400,6 +532,7 @@ async function runPipeline(
                 true,
                 [],
                 ephemeralSessionId,
+                preserveColmapWorkspace,
               );
               return;
             }
@@ -415,7 +548,7 @@ async function runPipeline(
 
     // ── Step 10/8: Segmentation — optional ──────────────────────────────
     let finalPlyPath = fusedPlyPath;
-    let layerFiles: string[] = [];
+    const layerFiles: string[] = [];
 
     if (enableSegmentation) {
       finalPlyPath = await segmentPointCloud(taskId, fusedPlyPath, segmentDir, segStep);
@@ -432,10 +565,18 @@ async function runPipeline(
       false,
       layerFiles,
       ephemeralSessionId,
+      preserveColmapWorkspace,
     );
 
   } catch (error: unknown) {
-    if (workDir) {
+    const currentTask = await getTask(taskId);
+    if (currentTask?.status === 'cancelled') {
+      if (workDir && !preserveColmapWorkspace) {
+        await rm(workDir, { recursive: true, force: true }).catch(() => {});
+      }
+      return;
+    }
+    if (workDir && !preserveColmapWorkspace) {
       await rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
     const message = error instanceof Error ? error.message : 'Point cloud generation failed';
@@ -459,7 +600,7 @@ async function segmentPointCloud(
   try {
     await mkdir(segmentDir, { recursive: true });
 
-    const { stdout: segStdout, stderr: segStderr } = await execFileAsync('python3', [
+    const { stdout: segStdout, stderr: segStderr } = await runTrackedCommand(taskId, 'python3', [
       segmentScriptPath,
       '--input', inputPlyPath,
       '--output_ply', segmentedPlyPath,
@@ -495,11 +636,12 @@ async function fallbackToSparsePly(
   enableSegmentation: boolean,
   enableDepthFusion: boolean,
   ephemeralSessionId: string,
+  preserveColmapWorkspace: boolean,
 ): Promise<void> {
   const plyOutputPath = path.join(sparseOutputDir, 'points3D.ply');
 
   try {
-    await execFileAsync('colmap', [
+    await runTrackedCommand(taskId, 'colmap', [
       'model_converter',
       '--input_path', sparseOutputDir,
       '--output_path', plyOutputPath,
@@ -534,7 +676,9 @@ async function fallbackToSparsePly(
 
   if (!plySrcPath) {
     await setTask(taskId, { status: 'error', error: 'COLMAP failed to generate point cloud file' });
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    if (!preserveColmapWorkspace) {
+      await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
     return;
   }
 
@@ -552,6 +696,7 @@ async function fallbackToSparsePly(
     false,
     [],
     ephemeralSessionId,
+    preserveColmapWorkspace,
   );
 }
 
@@ -564,6 +709,7 @@ async function copyResultToSession(
   withDepthFusion: boolean,
   layerFiles: string[],
   ephemeralSessionId: string,
+  preserveColmapWorkspace: boolean,
 ): Promise<void> {
   const sessionRoot = getSessionRoot(ephemeralSessionId);
   const destPlyDir = path.join(sessionRoot, 'pointclouds', pointcloudJobId);
@@ -617,7 +763,9 @@ async function copyResultToSession(
     // Ignore parse errors
   }
 
-  await rm(workDir, { recursive: true, force: true });
+  if (!preserveColmapWorkspace) {
+    await rm(workDir, { recursive: true, force: true });
+  }
 
   await setTask(taskId, {
     status: 'done',
@@ -627,6 +775,14 @@ async function copyResultToSession(
       pointCount,
       layerFiles,
       layerNames,
+      ...(preserveColmapWorkspace
+        ? {
+            colmapWorkspacePath: workDir,
+            colmapImagesDir: path.join(workDir, 'images'),
+            colmapSparseDir: path.join(workDir, 'sparse', '0'),
+            colmapDatabasePath: path.join(workDir, 'database.db'),
+          }
+        : {}),
     },
   });
 }

@@ -1,6 +1,6 @@
 /** Shape needed for sidebar listing policy (matches asset-library / Sidebar entries). */
 export type AssetListFields = {
-  assetType: 'video' | 'pointcloud' | 'model' | 'render-video';
+  assetType: 'video' | 'pointcloud' | 'splat' | 'model' | 'render-video';
   sourceNode: string;
   fileType: string;
   fileUrl: string;
@@ -8,7 +8,7 @@ export type AssetListFields = {
 
 /**
  * Assets tab policy: only user uploads (video, PLY), workflow render videos,
- * and terminal 3DGS model-generation GLB outputs (enforced at write time; this
+ * Gaussian splat PLY outputs, and terminal mesh-generation GLB outputs (enforced at write time; this
  * filters legacy rows that may still exist in assets.json).
  */
 export function isListedSidebarAsset(entry: AssetListFields): boolean {
@@ -21,6 +21,9 @@ export function isListedSidebarAsset(entry: AssetListFields): boolean {
   }
   if (assetType === 'pointcloud') {
     return sourceNode === 'pointCloud';
+  }
+  if (assetType === 'splat') {
+    return sourceNode === 'gaussianSplat' && (ft === 'splat-ply' || ft === 'ply' || urlLower.endsWith('.ply'));
   }
   if (assetType === 'render-video') {
     return sourceNode === 'videoPreview';

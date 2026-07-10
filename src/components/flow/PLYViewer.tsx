@@ -69,6 +69,28 @@ export default function PLYViewer({ plyUrl, className = '' }: PLYViewerProps) {
   const pointsRef = useRef<THREE.Points | null>(null);
   const initDoneRef = useRef(false);
 
+  const disposeThree = useCallback(() => {
+    cancelAnimationFrame(frameIdRef.current);
+    frameIdRef.current = 0;
+    if (pointsRef.current) {
+      pointsRef.current.geometry.dispose();
+      (pointsRef.current.material as THREE.Material).dispose();
+      pointsRef.current = null;
+    }
+    if (controlsRef.current) {
+      controlsRef.current.dispose();
+      controlsRef.current = null;
+    }
+    if (rendererRef.current) {
+      rendererRef.current.dispose();
+      rendererRef.current.domElement.parentElement?.removeChild(rendererRef.current.domElement);
+      rendererRef.current = null;
+    }
+    sceneRef.current = null;
+    cameraRef.current = null;
+    initDoneRef.current = false;
+  }, []);
+
   // Initialize Three.js scene — always called after container is mounted
   const initThree = useCallback(() => {
     const container = containerRef.current;
@@ -108,8 +130,9 @@ export default function PLYViewer({ plyUrl, className = '' }: PLYViewerProps) {
 
   // Effect 1: Initialize Three.js once the container div is in the DOM
   useEffect(() => {
+    if (!plyUrl) return;
     initThree();
-  }, [initThree]);
+  }, [initThree, plyUrl]);
 
   // Effect 2: Handle resize
   useEffect(() => {
@@ -135,13 +158,8 @@ export default function PLYViewer({ plyUrl, className = '' }: PLYViewerProps) {
   // Effect 3: Load PLY when plyUrl changes
   useEffect(() => {
     if (!plyUrl) {
-      // Remove existing points
-      if (pointsRef.current && sceneRef.current) {
-        sceneRef.current.remove(pointsRef.current);
-        pointsRef.current.geometry.dispose();
-        (pointsRef.current.material as THREE.Material).dispose();
-        pointsRef.current = null;
-      }
+      disposeThree();
+      setStatus('ready');
       return;
     }
 
@@ -214,33 +232,12 @@ export default function PLYViewer({ plyUrl, className = '' }: PLYViewerProps) {
         setStatus('error');
       }
     );
-  }, [plyUrl, initThree]);
+  }, [plyUrl, initThree, disposeThree]);
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      cancelAnimationFrame(frameIdRef.current);
-      if (pointsRef.current) {
-        pointsRef.current.geometry.dispose();
-        (pointsRef.current.material as THREE.Material).dispose();
-        pointsRef.current = null;
-      }
-      if (controlsRef.current) {
-        controlsRef.current.dispose();
-        controlsRef.current = null;
-      }
-      if (rendererRef.current) {
-        rendererRef.current.dispose();
-        if (rendererRef.current.domElement.parentElement) {
-          rendererRef.current.domElement.parentElement.removeChild(rendererRef.current.domElement);
-        }
-        rendererRef.current = null;
-      }
-      sceneRef.current = null;
-      cameraRef.current = null;
-      initDoneRef.current = false;
-    };
-  }, []);
+    return disposeThree;
+  }, [disposeThree]);
 
   return (
     <div

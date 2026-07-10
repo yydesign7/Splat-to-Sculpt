@@ -1,4 +1,12 @@
-export type NodeCategory = 'input' | 'process' | 'output' | 'annotation';
+export type NodeCategory = 'input' | 'reconstruction' | 'asset' | 'output' | 'annotation';
+
+export interface NodeVisualTheme {
+  accent: string;
+  accentSoft: string;
+  accentMuted: string;
+  text: string;
+  border: string;
+}
 
 export interface NodeTypeConfig {
   type: string;
@@ -9,83 +17,126 @@ export interface NodeTypeConfig {
   description: string;
 }
 
+export const NODE_CATEGORY_THEMES: Record<NodeCategory, NodeVisualTheme> = {
+  input: {
+    accent: '#4f7fa8',
+    accentSoft: 'rgba(79, 127, 168, 0.18)',
+    accentMuted: 'rgba(79, 127, 168, 0.34)',
+    text: '#b8d8f5',
+    border: 'rgba(79, 127, 168, 0.55)',
+  },
+  reconstruction: {
+    accent: '#7b68c8',
+    accentSoft: 'rgba(123, 104, 200, 0.18)',
+    accentMuted: 'rgba(123, 104, 200, 0.34)',
+    text: '#d2c8ff',
+    border: 'rgba(123, 104, 200, 0.55)',
+  },
+  asset: {
+    accent: '#9a6674',
+    accentSoft: 'rgba(154, 102, 116, 0.18)',
+    accentMuted: 'rgba(154, 102, 116, 0.34)',
+    text: '#f0bdca',
+    border: 'rgba(154, 102, 116, 0.55)',
+  },
+  output: {
+    accent: '#5f8f74',
+    accentSoft: 'rgba(95, 143, 116, 0.18)',
+    accentMuted: 'rgba(95, 143, 116, 0.34)',
+    text: '#bde6ce',
+    border: 'rgba(95, 143, 116, 0.55)',
+  },
+  annotation: {
+    accent: '#a88945',
+    accentSoft: 'rgba(168, 137, 69, 0.18)',
+    accentMuted: 'rgba(168, 137, 69, 0.34)',
+    text: '#ead69b',
+    border: 'rgba(168, 137, 69, 0.55)',
+  },
+};
+
 export const NODE_TYPE_CONFIGS: NodeTypeConfig[] = [
   {
     type: 'videoUpload',
     label: 'Video Upload',
     category: 'input',
-    color: '#4a6a8a',
+    color: NODE_CATEGORY_THEMES.input.accent,
     icon: '📹',
-    description: 'Upload a video file',
+    description: 'upload video and set frame count',
   },
   {
     type: 'frameExtraction',
     label: 'Frame Extraction',
-    category: 'process',
-    color: '#6b5f7a',
+    category: 'reconstruction',
+    color: NODE_CATEGORY_THEMES.reconstruction.accent,
     icon: '🎞️',
-    description: 'Extract video frames',
+    description: 'video -> image',
   },
   {
-    type: 'pointCloud',
-    label: 'Point Cloud Gen',
-    category: 'process',
-    color: '#4a7a74',
-    icon: '☁️',
-    description: 'Convert images to point cloud data',
+    type: 'gaussianSplat',
+    label: 'Gaussian Splat Gen',
+    category: 'reconstruction',
+    color: NODE_CATEGORY_THEMES.reconstruction.accent,
+    icon: '✦',
+    description: 'image/PLY -> splat PLY',
   },
   {
     type: 'material',
     label: 'Material Gen',
-    category: 'process',
-    color: '#7a6e4a',
+    category: 'asset',
+    color: NODE_CATEGORY_THEMES.asset.accent,
     icon: '🎨',
-    description: 'Generate texture material data',
-  },
-  {
-    type: 'videoPreview',
-    label: 'Video Preview',
-    category: 'process',
-    color: '#5a7a6a',
-    icon: '🎬',
-    description: 'Preview and play video',
+    description: 'text -> PNG',
   },
   {
     type: 'modelSurface',
     label: 'Surface Processing',
-    category: 'process',
-    color: '#5a7068',
+    category: 'asset',
+    color: NODE_CATEGORY_THEMES.asset.accent,
     icon: '🧱',
-    description: 'Select model layer and render',
+    description: 'model -> model',
   },
   {
     type: 'modelOrganize',
     label: 'Model Cleanup',
-    category: 'process',
-    color: '#5a6878',
+    category: 'asset',
+    color: NODE_CATEGORY_THEMES.asset.accent,
     icon: '🧹',
-    description: 'Preview and clean up model',
+    description: 'model -> model',
   },
   {
     type: 'modelGeneration',
-    label: '3DGS Model Gen',
+    label: 'Mesh Gen',
+    category: 'asset',
+    color: NODE_CATEGORY_THEMES.asset.accent,
+    icon: '▣',
+    description: 'splat/PLY/OBJ/GLB -> GLB/OBJ/PLY',
+  },
+  {
+    type: 'videoPreview',
+    label: 'Video Preview',
     category: 'output',
-    color: '#7a4a55',
-    icon: '🔮',
-    description: 'Merge point cloud and texture',
+    color: NODE_CATEGORY_THEMES.output.accent,
+    icon: '🎬',
+    description: 'model -> video',
   },
   {
     type: 'stickyNote',
     label: 'Sticky Note',
     category: 'annotation',
-    color: '#a67c2a',
+    color: NODE_CATEGORY_THEMES.annotation.accent,
     icon: '📝',
-    description: 'Saved with workflow',
+    description: 'record your idea',
   },
 ];
 
 export function getNodeConfig(type: string): NodeTypeConfig | undefined {
   return NODE_TYPE_CONFIGS.find((c) => c.type === type);
+}
+
+export function getNodeVisualTheme(type: string): NodeVisualTheme {
+  const category = getNodeConfig(type)?.category ?? 'asset';
+  return NODE_CATEGORY_THEMES[category];
 }
 
 export const NODE_WIDTH = 280;
