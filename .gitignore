@@ -101,3 +101,17 @@ Desktop.ini
 .turbo
 
 .coze-logs
+
+# Generated workflow assets and local reconstruction outputs
+.data/
+scripts/.mamba-root/
+public/asset-published/
+public/videos/
+public/frames/
+public/colmap-scenes/
+public/blender-output/
+public/obj-processed/
+public/rotation-videos/
+public/textures/
+__pycache__/
+*.py[cod]
