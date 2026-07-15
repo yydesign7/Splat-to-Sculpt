@@ -122,6 +122,7 @@ export async function POST(request: NextRequest) {
     framePaths,
     enableDepthFusion = true,
     enableSegmentation = true,
+    enableForegroundMask = true,
     ephemeralSessionId,
     preserveColmapWorkspace = false,
     colmapOnly = false,
@@ -129,6 +130,7 @@ export async function POST(request: NextRequest) {
     framePaths?: string[];
     enableDepthFusion?: boolean;
     enableSegmentation?: boolean;
+    enableForegroundMask?: boolean;
     ephemeralSessionId?: string;
     preserveColmapWorkspace?: boolean;
     colmapOnly?: boolean;
@@ -154,11 +156,12 @@ export async function POST(request: NextRequest) {
     progressStep: 0,
     enableDepthFusion,
     enableSegmentation,
+    enableForegroundMask,
     ephemeralSessionId,
   });
 
   // Run the heavy COLMAP + depth processing asynchronously
-  runPipeline(taskId, framePaths, enableDepthFusion, enableSegmentation, ephemeralSessionId, preserveColmapWorkspace, colmapOnly).catch(() => {});
+  runPipeline(taskId, framePaths, enableDepthFusion, enableSegmentation, enableForegroundMask, ephemeralSessionId, preserveColmapWorkspace, colmapOnly).catch(() => {});
 
   // Return the task ID immediately so the client can poll for progress
   return NextResponse.json({
@@ -263,6 +266,7 @@ async function runPipeline(
   framePaths: string[],
   enableDepthFusion: boolean,
   enableSegmentation: boolean,
+  enableForegroundMask: boolean,
   ephemeralSessionId: string,
   preserveColmapWorkspace: boolean,
   colmapOnly: boolean,
@@ -273,9 +277,11 @@ async function runPipeline(
     const pointcloudJobId = randomUUID();
     workDir = path.join('/tmp', `pointcloud_${pointcloudJobId}`);
     const imagesDir = path.join(workDir, 'images');
+    const maskedImagesDir = path.join(workDir, 'masked_images');
     const sparseDir = path.join(workDir, 'sparse');
     const denseDir = path.join(workDir, 'dense');
     const depthDir = path.join(workDir, 'depth_maps');
+    const masksDir = path.join(workDir, 'masks');
     const segmentDir = path.join(workDir, 'segmented');
     const segStep = enableDepthFusion ? 10 : 8;
 
@@ -308,11 +314,47 @@ async function runPipeline(
       await copyFile(srcPath, destPath);
     }
 
+    let masksGenerated = false;
+    if (enableForegroundMask) {
+      await setTask(taskId, { progress: 'Generating foreground masks...', progressStep: 1 });
+      const maskScriptPath = path.join(process.cwd(), 'scripts', 'generate_foreground_masks.py');
+      try {
+        const { stdout, stderr } = await runTrackedCommand(taskId, 'python3', [
+          maskScriptPath,
+          '--images-dir', imagesDir,
+          '--masks-dir', masksDir,
+          '--masked-images-dir', maskedImagesDir,
+        ], { timeout: 300000 });
+        if (stdout) console.log('[foreground-mask]', stdout);
+        if (stderr) console.error('[foreground-mask stderr]', stderr);
+        const maskEntries = await readdir(masksDir).catch(() => [] as string[]);
+        const maskedImageEntries = await readdir(maskedImagesDir).catch(() => [] as string[]);
+        const maskResultLine = stdout.trim().split('\n').reverse().find((line) => line.trim().startsWith('{'));
+        const maskResult = maskResultLine
+          ? JSON.parse(maskResultLine) as { valid?: boolean; method?: string; maxForegroundRatio?: number }
+          : null;
+        const maskCount = maskEntries.filter((entry) => entry.toLowerCase().endsWith('.png')).length;
+        const maskedImageCount = maskedImageEntries.filter((entry) => /\.(jpe?g|png|webp)$/i.test(entry)).length;
+        masksGenerated =
+          maskResult?.valid === true &&
+          maskCount === selectedFrames.length &&
+          maskedImageCount === selectedFrames.length;
+        if (!masksGenerated) {
+          console.warn('[foreground-mask] Generated masks failed quality checks; COLMAP will run without mask_path.', maskResult);
+        }
+      } catch (maskErr: unknown) {
+        const maskErrorMsg = maskErr instanceof Error ? maskErr.message : 'Foreground mask generation failed';
+        console.error('[foreground-mask] Error (non-fatal):', maskErrorMsg);
+        masksGenerated = false;
+      }
+    }
+    const denseInputImagesDir = masksGenerated ? maskedImagesDir : imagesDir;
+
     // ── Step 2: Feature Extraction ──────────────────────────────────
     const databasePath = path.join(workDir, 'database.db');
     await setTask(taskId, { progress: 'Extracting features...', progressStep: 2 });
 
-    await runTrackedCommand(taskId, 'colmap', [
+    const featureExtractorArgs = [
       'feature_extractor',
       '--database_path', databasePath,
       '--image_path', imagesDir,
@@ -320,7 +362,8 @@ async function runPipeline(
       '--SiftExtraction.use_gpu', useGpu ? '1' : '0',
       '--SiftExtraction.max_num_features', '32000',
       '--SiftExtraction.peak_threshold', '0.004',
-    ], { timeout: 600000 });
+    ];
+    await runTrackedCommand(taskId, 'colmap', featureExtractorArgs, { timeout: 600000 });
 
     // ── Step 3: Feature Matching ────────────────────────────────────
     await setTask(taskId, { progress: 'Feature matching...', progressStep: 3 });
@@ -363,8 +406,9 @@ async function runPipeline(
         sparseOutputDir,
         pointcloudJobId,
         workDir,
+        enableSegmentation,
         false,
-        false,
+        masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
       );
@@ -377,7 +421,7 @@ async function runPipeline(
 
     await runTrackedCommand(taskId, 'colmap', [
       'image_undistorter',
-      '--image_path', imagesDir,
+      '--image_path', denseInputImagesDir,
       '--input_path', sparseOutputDir,
       '--output_path', denseDir,
       '--output_type', 'COLMAP',
@@ -394,7 +438,7 @@ async function runPipeline(
         taskId,
         databasePath,
         sparseOutputDir,
-        imagesDir,
+        denseInputImagesDir,
         denseDir,
         selectedFrames.length,
         useGpu,
@@ -411,6 +455,7 @@ async function runPipeline(
         workDir,
         enableSegmentation,
         enableDepthFusion,
+        masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
       );
@@ -442,6 +487,7 @@ async function runPipeline(
         workDir,
         enableSegmentation,
         enableDepthFusion,
+        masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
       );
@@ -466,11 +512,21 @@ async function runPipeline(
         workDir,
         enableSegmentation,
         enableDepthFusion,
+        masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
       );
       return;
     }
+
+    const foregroundDensePlyPath = await filterPointCloudByMasks(
+      taskId,
+      fusedPlyPath,
+      sparseOutputDir,
+      masksGenerated ? masksDir : undefined,
+      workDir,
+      'dense',
+    );
 
     // ── Step 8: Depth Estimation (Depth Anything V2) — optional ──────
     if (enableDepthFusion) {
@@ -480,7 +536,7 @@ async function runPipeline(
       try {
         const { stdout, stderr } = await runTrackedCommand(taskId, 'python3', [
           scriptPath,
-          '--images_dir', imagesDir,
+          '--images_dir', denseInputImagesDir,
           '--output_dir', depthDir,
           '--model_size', 'small',
         ], { timeout: 600000 });
@@ -507,9 +563,9 @@ async function runPipeline(
           const { stdout: fusionStdout, stderr: fusionStderr } = await runTrackedCommand(taskId, 'python3', [
             fusionScriptPath,
             '--sparse_dir', sparseOutputDir,
-            '--images_dir', imagesDir,
+            '--images_dir', denseInputImagesDir,
             '--depth_dir', depthDir,
-            '--dense_ply', fusedPlyPath,
+            '--dense_ply', foregroundDensePlyPath,
             '--output_ply', mergedPlyPath,
             '--sample_step', '2',
           ], { timeout: 600000 });
@@ -521,9 +577,17 @@ async function runPipeline(
           try {
             const mergedStat = await stat(mergedPlyPath);
             if (mergedStat.size > 100) {
+              const foregroundMergedPlyPath = await filterPointCloudByMasks(
+                taskId,
+                mergedPlyPath,
+                sparseOutputDir,
+                masksGenerated ? masksDir : undefined,
+                workDir,
+                'depth-merged',
+              );
               const finalMergedPlyPath = enableSegmentation
-                ? await segmentPointCloud(taskId, mergedPlyPath, segmentDir, segStep)
-                : mergedPlyPath;
+                ? await segmentPointCloud(taskId, foregroundMergedPlyPath, segmentDir, segStep)
+                : foregroundMergedPlyPath;
               await copyResultToSession(
                 taskId,
                 finalMergedPlyPath,
@@ -547,11 +611,11 @@ async function runPipeline(
     }
 
     // ── Step 10/8: Segmentation — optional ──────────────────────────────
-    let finalPlyPath = fusedPlyPath;
+    let finalPlyPath = foregroundDensePlyPath;
     const layerFiles: string[] = [];
 
     if (enableSegmentation) {
-      finalPlyPath = await segmentPointCloud(taskId, fusedPlyPath, segmentDir, segStep);
+      finalPlyPath = await segmentPointCloud(taskId, foregroundDensePlyPath, segmentDir, segStep);
     }
 
     // ── Final step: Copy final PLY as output ────────────────────────────
@@ -583,6 +647,77 @@ async function runPipeline(
     console.error('[generate-pointcloud] Error:', message);
     await setTask(taskId, { status: 'error', error: message });
   }
+}
+
+async function ensureColmapTextModel(
+  taskId: string,
+  sparseOutputDir: string,
+  workDir: string,
+): Promise<string> {
+  const textModelDir = path.join(workDir, 'sparse_text');
+  const camerasTextPath = path.join(textModelDir, 'cameras.txt');
+  const imagesTextPath = path.join(textModelDir, 'images.txt');
+  try {
+    await Promise.all([stat(camerasTextPath), stat(imagesTextPath)]);
+    return textModelDir;
+  } catch {
+    await mkdir(textModelDir, { recursive: true });
+  }
+
+  await runTrackedCommand(taskId, 'colmap', [
+    'model_converter',
+    '--input_path', sparseOutputDir,
+    '--output_path', textModelDir,
+    '--output_type', 'TXT',
+  ], { timeout: 30000 });
+  return textModelDir;
+}
+
+async function filterPointCloudByMasks(
+  taskId: string,
+  inputPlyPath: string,
+  sparseOutputDir: string,
+  masksDir: string | undefined,
+  workDir: string,
+  outputName: string,
+): Promise<string> {
+  if (!masksDir) return inputPlyPath;
+
+  await setTask(taskId, { progress: 'Filtering point cloud with foreground masks...' });
+  const filterDir = path.join(workDir, 'foreground-filtered');
+  const outputPlyPath = path.join(filterDir, `${outputName}.ply`);
+  try {
+    await mkdir(filterDir, { recursive: true });
+    const textModelDir = await ensureColmapTextModel(taskId, sparseOutputDir, workDir);
+    const filterScriptPath = path.join(process.cwd(), 'scripts', 'filter_pointcloud_by_masks.py');
+    const { stdout, stderr } = await runTrackedCommand(taskId, 'python3', [
+      filterScriptPath,
+      '--input-ply', inputPlyPath,
+      '--output-ply', outputPlyPath,
+      '--sparse-dir', textModelDir,
+      '--masks-dir', masksDir,
+      '--min-visible-views', '3',
+      '--min-foreground-ratio', '0.6',
+      '--max-views', '24',
+    ], { timeout: 300000 });
+    if (stderr.trim()) console.error('[foreground-point-filter stderr]', stderr.slice(-4000));
+    const resultLine = stdout.trim().split('\n').reverse().find((line) => line.trim().startsWith('{'));
+    const result = resultLine
+      ? JSON.parse(resultLine) as { status?: string; inputPointCount?: number; retainedPointCount?: number; retainedRatio?: number }
+      : null;
+    const outputStat = await stat(outputPlyPath);
+    if (result?.status === 'ok' && outputStat.size > 100) {
+      console.log('[foreground-point-filter]', result);
+      return outputPlyPath;
+    }
+  } catch (filterErr: unknown) {
+    const message = filterErr instanceof Error ? filterErr.message : 'Foreground point filtering failed';
+    const stderr = filterErr instanceof Error && 'stderr' in filterErr
+      ? String((filterErr as Error & { stderr?: string }).stderr || '')
+      : '';
+    console.error('[foreground-point-filter] Error (non-fatal):', message, stderr.slice(-4000));
+  }
+  return inputPlyPath;
 }
 
 async function segmentPointCloud(
@@ -635,6 +770,7 @@ async function fallbackToSparsePly(
   workDir: string,
   enableSegmentation: boolean,
   enableDepthFusion: boolean,
+  masksDir: string | undefined,
   ephemeralSessionId: string,
   preserveColmapWorkspace: boolean,
 ): Promise<void> {
@@ -684,9 +820,17 @@ async function fallbackToSparsePly(
 
   const segmentDir = path.join(workDir, 'segmented');
   const segStep = enableDepthFusion ? 10 : 8;
+  const foregroundPlyPath = await filterPointCloudByMasks(
+    taskId,
+    plySrcPath,
+    sparseOutputDir,
+    masksDir,
+    workDir,
+    'sparse',
+  );
   const finalPlyPath = enableSegmentation
-    ? await segmentPointCloud(taskId, plySrcPath, segmentDir, segStep)
-    : plySrcPath;
+    ? await segmentPointCloud(taskId, foregroundPlyPath, segmentDir, segStep)
+    : foregroundPlyPath;
 
   await copyResultToSession(
     taskId,
@@ -781,6 +925,7 @@ async function copyResultToSession(
             colmapImagesDir: path.join(workDir, 'images'),
             colmapSparseDir: path.join(workDir, 'sparse', '0'),
             colmapDatabasePath: path.join(workDir, 'database.db'),
+            colmapMasksDir: path.join(workDir, 'masks'),
           }
         : {}),
     },

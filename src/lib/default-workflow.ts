@@ -5,7 +5,7 @@ export const DEFAULT_WORKFLOW_NAME = 'Default Workflow';
 export const DEFAULT_WORKFLOW_TIMESTAMP = '2026-01-01T00:00:00.000Z';
 
 export const initialNodes: Node[] = [
-  // Row 1: Main pipeline (material is placed above surface column, see id 5)
+  // Row 1: Main pipeline
   {
     id: '1',
     type: 'videoUpload',
@@ -22,7 +22,7 @@ export const initialNodes: Node[] = [
     id: 'gs1',
     type: 'gaussianSplat',
     position: { x: 750, y: 80 },
-    data: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, layerFiles: [], layerNames: [] },
+    data: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, enableFastSegmentation: true, layerFiles: [], layerNames: [] },
   },
   {
     id: '4',
@@ -30,14 +30,6 @@ export const initialNodes: Node[] = [
     position: { x: 1100, y: 80 },
     data: { label: 'Mesh Gen', modelUrl: null, isFullscreen: false, inputType: null, outputUrl: null, outputType: null, textureUrl: null, meshStatus: 'idle', outputFormat: 'glb', errorMessage: null, faceCount: null, gaussianCount: null, computeBackend: null, renderUrl: null, lightParams: null, layerFiles: [], layerNames: [], layerGlbUrls: [] },
   },
-  // Material Gen: directly above surface (same x as id 7)
-  {
-    id: '5',
-    type: 'material',
-    position: { x: 1450, y: -260 },
-    data: { label: 'Material Gen', status: 'idle', textureCount: null, textInput: '', textureUrl: null, errorMessage: null },
-  },
-
   // Model cleanup: directly below first Mesh Gen (id 4, x=1100)
   {
     id: '10',

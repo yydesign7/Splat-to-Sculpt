@@ -5,6 +5,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as THREE from 'three';
 import type { MaterialParams } from './custom-nodes';
@@ -215,13 +216,12 @@ export default function InteractiveModelViewer({
     onSuccessfulModelLoadRef.current = onSuccessfulModelLoad;
   }, [onSuccessfulModelLoad]);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>(modelUrl ? 'loading' : 'ready');
-  const [layerNames, setLayerNames] = useState<string[]>([]);
   const onLayersDetectedRef = useRef(onLayersDetected);
-  useEffect(() => { onLayersDetectedRef.current = onLayersDetected; });
+  useEffect(() => { onLayersDetectedRef.current = onLayersDetected; }, [onLayersDetected]);
 
   // Store metadata layer names in a ref so the click handler can use them
   const metadataLayerNamesRef = useRef<string[] | undefined>(metadataLayerNames);
-  useEffect(() => { metadataLayerNamesRef.current = metadataLayerNames; });
+  useEffect(() => { metadataLayerNamesRef.current = metadataLayerNames; }, [metadataLayerNames]);
 
   // Map: mesh.name → metadata layer name (built during model load)
   const meshToLayerMapRef = useRef<Map<string, string>>(new Map());
@@ -243,18 +243,90 @@ export default function InteractiveModelViewer({
   const previewMaterialParamsRef = useRef<MaterialParams | null>(previewMaterialParams ?? null);
   const previewMaterialLayerRef = useRef<string | null>(previewMaterialLayer ?? null);
 
+  const applyVisualState = useCallback(() => {
+    const model = modelRef.current;
+    const targetName = highlightLayerRef.current;
+    const previewParams = previewMaterialParamsRef.current;
+    const previewLayer = previewMaterialLayerRef.current;
+    const meshMap = meshToLayerMapRef.current;
+    if (!model) return;
+
+    model.traverse((child) => {
+      if (!(child instanceof THREE.Mesh) || !child.material) return;
+      const mats = standardMaterials(child.material);
+      if (mats.length === 0) return;
+
+      const mappedLayer = meshMap.get(child.name);
+      const matchesPreviewLayer = !previewLayer || mappedLayer === previewLayer || child.name === previewLayer;
+      const isHighlighted = !!targetName && (mappedLayer === targetName || child.name === targetName);
+
+      for (const mat of mats) {
+        if (previewParams && matchesPreviewLayer) {
+          applyPreviewMaterial(mat, previewParams);
+        } else {
+          saveOriginalMaterial(mat);
+        }
+
+        if (isHighlighted) {
+          mat.emissive.copy(HIGHLIGHT_EMISSIVE);
+          mat.emissiveIntensity = 0.5;
+          mat.opacity = 1.0;
+          mat.transparent = false;
+        } else if (targetName) {
+          mat.opacity = 0.3;
+          mat.transparent = true;
+          mat.emissive.set(0x000000);
+          mat.emissiveIntensity = 0;
+        } else {
+          restoreMaterial(mat);
+        }
+      }
+    });
+  }, []);
+
+  const renderScene = useCallback(() => {
+    const renderer = rendererRef.current;
+    const scene = sceneRef.current;
+    const camera = cameraRef.current;
+    if (!renderer || !scene || !camera) return;
+    controlsRef.current?.update();
+    applyVisualState();
+    renderer.render(scene, camera);
+  }, [applyVisualState]);
+
+  const scheduleRender = useCallback(() => {
+    if (frameIdRef.current) return;
+    frameIdRef.current = requestAnimationFrame(() => {
+      frameIdRef.current = 0;
+      renderScene();
+    });
+  }, [renderScene]);
+
+  const scheduleRenderBurst = useCallback((frameCount = 6) => {
+    let remaining = frameCount;
+    const tick = () => {
+      renderScene();
+      remaining -= 1;
+      if (remaining > 0) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, [renderScene]);
+
   // Track highlight layer in ref for use in animation loop
   useEffect(() => {
     highlightLayerRef.current = highlightLayer ?? null;
-  }, [highlightLayer]);
+    scheduleRender();
+  }, [highlightLayer, scheduleRender]);
 
   useEffect(() => {
     previewMaterialParamsRef.current = previewMaterialParams ?? null;
-  }, [previewMaterialParams]);
+    scheduleRender();
+  }, [previewMaterialParams, scheduleRender]);
 
   useEffect(() => {
     previewMaterialLayerRef.current = previewMaterialLayer ?? null;
-  }, [previewMaterialLayer]);
+    scheduleRender();
+  }, [previewMaterialLayer, scheduleRender]);
 
   // Effect: Apply lightParams to Three.js lights in real-time
   useEffect(() => {
@@ -283,7 +355,8 @@ export default function InteractiveModelViewer({
     if (renderer) {
       renderer.toneMappingExposure = lightParams.exposure;
     }
-  }, [lightParams]);
+    scheduleRender();
+  }, [lightParams, scheduleRender]);
 
   // Initialize Three.js scene
   const initThree = useCallback(() => {
@@ -311,8 +384,8 @@ export default function InteractiveModelViewer({
     cameraRef.current = camera;
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
+    controls.enableDamping = false;
+    controls.addEventListener('change', scheduleRender);
     controlsRef.current = controls;
 
     // Lights
@@ -328,60 +401,9 @@ export default function InteractiveModelViewer({
     scene.add(dir2);
     fillLightRef.current = dir2;
 
-    const animate = () => {
-      frameIdRef.current = requestAnimationFrame(animate);
-      controls.update();
-
-      // Apply highlight to the selected layer directly in render loop
-      const model = modelRef.current;
-      const targetName = highlightLayerRef.current;
-      const previewParams = previewMaterialParamsRef.current;
-      const previewLayer = previewMaterialLayerRef.current;
-      const meshMap = meshToLayerMapRef.current;
-      if (model) {
-        model.traverse((child) => {
-          if (child instanceof THREE.Mesh && child.material) {
-            const mats = standardMaterials(child.material);
-            if (mats.length === 0) return;
-
-            const mappedLayer = meshMap.get(child.name);
-            const matchesPreviewLayer = !previewLayer || mappedLayer === previewLayer || child.name === previewLayer;
-            const isHighlighted = !!targetName && (mappedLayer === targetName || child.name === targetName);
-
-            for (const mat of mats) {
-              if (previewParams && matchesPreviewLayer) {
-                applyPreviewMaterial(mat, previewParams);
-              } else {
-                saveOriginalMaterial(mat);
-              }
-
-              if (isHighlighted) {
-                // Highlight this layer
-                mat.emissive.copy(HIGHLIGHT_EMISSIVE);
-                mat.emissiveIntensity = 0.5;
-                mat.opacity = 1.0;
-                mat.transparent = false;
-              } else if (targetName) {
-                // Dim other layers
-                mat.opacity = 0.3;
-                mat.transparent = true;
-                mat.emissive.set(0x000000);
-                mat.emissiveIntensity = 0;
-              } else {
-                // No highlight - restore
-                restoreMaterial(mat);
-              }
-            }
-          }
-        });
-      }
-
-      renderer.render(scene, camera);
-    };
-    animate();
-
     initDoneRef.current = true;
-  }, []);
+    scheduleRender();
+  }, [scheduleRender]);
 
   // Effect: Initialize Three.js once
   useEffect(() => {
@@ -403,11 +425,12 @@ export default function InteractiveModelViewer({
       renderer.setSize(width, height);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      scheduleRender();
     });
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [scheduleRender]);
 
   // Effect: Load model when url/type changes
   useEffect(() => {
@@ -418,7 +441,6 @@ export default function InteractiveModelViewer({
         disposeObject3D(modelRef.current);
         modelRef.current = null;
       }
-      setLayerNames([]);
       setStatus('ready');
       return;
     }
@@ -452,14 +474,15 @@ export default function InteractiveModelViewer({
       const hasVertexColors = vertexColorLayers.size > 0;
       const names: string[] = [];
       const meshToLayerMap = new Map<string, string>();
+      const currentMetadataLayerNames = metadataLayerNamesRef.current;
 
       // Determine which layer name source to use
       // metadataLayerNames (from workflow metadata) takes priority over vertex color detection
-      const useMetadataLayers = metadataLayerNames && metadataLayerNames.length > 0;
+      const useMetadataLayers = currentMetadataLayerNames && currentMetadataLayerNames.length > 0;
 
       if (useMetadataLayers) {
         // Use metadata-driven layer names as the source of truth
-        for (const name of metadataLayerNames) {
+        for (const name of currentMetadataLayerNames) {
           names.push(name);
         }
       } else if (hasVertexColors) {
@@ -571,9 +594,8 @@ export default function InteractiveModelViewer({
         return;
       }
 
-      setLayerNames(names);
       meshToLayerMapRef.current = meshToLayerMap;
-      onLayersDetected?.(names);
+      onLayersDetectedRef.current?.(names);
 
       // Step 1: Force update matrixWorld so bounding box is accurate
       object.updateMatrixWorld(true);
@@ -581,7 +603,7 @@ export default function InteractiveModelViewer({
       // Step 2: Compute bounding box from world-space geometry
       const box = new THREE.Box3();
       object.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.geometry) {
+        if ((child instanceof THREE.Mesh || child instanceof THREE.Points) && child.geometry) {
           child.geometry.computeBoundingBox();
           if (child.geometry.boundingBox) {
             box.union(child.geometry.boundingBox.clone().applyMatrix4(child.matrixWorld));
@@ -598,13 +620,6 @@ export default function InteractiveModelViewer({
         return;
       }
 
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-      const size = new THREE.Vector3();
-      box.getSize(size);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = maxDim > 0 && Number.isFinite(maxDim) ? 2 / maxDim : 1;
-
       // Step 3: Reset root transform, then apply centering & scaling
       // This avoids stale matrixWorld from loaders
       object.position.set(0, 0, 0);
@@ -615,10 +630,10 @@ export default function InteractiveModelViewer({
       // Step 4: Recompute bounding box from clean local-space geometry
       const localBox = new THREE.Box3();
       object.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.geometry) {
+        if ((child instanceof THREE.Mesh || child instanceof THREE.Points) && child.geometry) {
           child.geometry.computeBoundingBox();
           if (child.geometry.boundingBox) {
-            localBox.union(child.geometry.boundingBox);
+            localBox.union(child.geometry.boundingBox.clone().applyMatrix4(child.matrixWorld));
           }
         }
       });
@@ -660,6 +675,8 @@ export default function InteractiveModelViewer({
         onSuccessfulModelLoadRef.current?.(loadTargetUrl);
       }
       setStatus('ready');
+      scheduleRender();
+      scheduleRenderBurst();
     };
 
     const onError = () => {
@@ -740,13 +757,46 @@ export default function InteractiveModelViewer({
           );
         },
       );
-    } else {
-      // PLY - not supported for interactive viewing, just show as basic
-      if (seq === loadSeqRef.current && loadTargetUrl === modelUrlRef.current) {
-        setStatus('error');
-      }
+    } else if (modelType === 'ply') {
+      const loader = new PLYLoader();
+      loader.load(
+        modelUrl,
+        (geometry) => {
+          if (seq !== loadSeqRef.current) {
+            geometry.dispose();
+            return;
+          }
+          sanitizeGeometry(geometry);
+
+          const object = new THREE.Object3D();
+          if (geometry.index) {
+            geometry.computeVertexNormals();
+            const material = new THREE.MeshStandardMaterial({
+              color: geometry.hasAttribute('color') ? 0xffffff : 0xaaaaaa,
+              metalness: 0.1,
+              roughness: 0.6,
+              vertexColors: geometry.hasAttribute('color'),
+              side: THREE.DoubleSide,
+            });
+            object.add(new THREE.Mesh(geometry, material));
+          } else {
+            const material = new THREE.PointsMaterial({
+              size: 0.02,
+              vertexColors: geometry.hasAttribute('color'),
+              sizeAttenuation: true,
+              color: geometry.hasAttribute('color') ? 0xffffff : 0x7aaa9e,
+            });
+            object.add(new THREE.Points(geometry, material));
+          }
+          addModelToScene(object);
+        },
+        undefined,
+        onError,
+      );
+    } else if (seq === loadSeqRef.current && loadTargetUrl === modelUrlRef.current) {
+      setStatus('error');
     }
-  }, [modelUrl, modelType, initThree]);
+  }, [modelUrl, modelType, initThree, scheduleRender, scheduleRenderBurst]);
 
   // Handle click for layer selection
   const handleClick = useCallback(
@@ -845,6 +895,7 @@ export default function InteractiveModelViewer({
         modelRef.current = null;
       }
       if (controlsRef.current) {
+        controlsRef.current.removeEventListener('change', scheduleRender);
         controlsRef.current.dispose();
         controlsRef.current = null;
       }
@@ -859,7 +910,7 @@ export default function InteractiveModelViewer({
       cameraRef.current = null;
       initDoneRef.current = false;
     };
-  }, []);
+  }, [scheduleRender]);
 
   return (
     <div

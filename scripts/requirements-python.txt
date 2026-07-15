@@ -3,6 +3,9 @@
 # PyOpenGL>=3.1.10 is applied after this file in install-deps-async.sh (pyrender may pin 3.1.0).
 trimesh
 numpy<2
+protobuf<=3.20.3
 pyrender
 opencv-python-headless==4.10.0.84
 open3d
+onnxruntime<1.27
+rembg[cpu]==2.0.67

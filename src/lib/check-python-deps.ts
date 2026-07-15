@@ -15,7 +15,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { access } from 'fs/promises';
-import path from 'path';
 
 const execFileAsync = promisify(execFile);
 

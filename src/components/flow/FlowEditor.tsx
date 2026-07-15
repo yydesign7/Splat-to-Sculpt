@@ -145,7 +145,7 @@ const defaultDataMap: Record<NodeKind, Record<string, unknown>> = {
     targetFrameCount: 120,
   },
   frameExtraction: { label: 'Frame Extraction', videoServerPath: null, targetFrameCount: 120, frames: [], outputFolder: null, frameCount: 0, status: 'idle', errorMessage: null },
-  gaussianSplat: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, layerFiles: [], layerNames: [] },
+  gaussianSplat: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, enableFastSegmentation: true, layerFiles: [], layerNames: [] },
   material: { label: 'Material Gen', status: 'idle', textureCount: null, textInput: '', textureUrl: null, errorMessage: null },
   modelOrganize: { label: 'Model Cleanup', modelUrl: null, outputUrl: null, outputType: null, isFullscreen: false, organizeStatus: 'idle', errorMessage: null, layerFiles: [], layerNames: [], layerGlbUrls: [] },
   videoPreview: { label: 'Video Preview', videoUrl: null, videoName: null, modelUrl: null, videoGenerating: false, errorMessage: null, lightParams: null },
@@ -515,7 +515,7 @@ function FlowEditorInner() {
 
       setNodes((nds) => [...nds, newNode]);
     },
-    [screenToFlowPosition, setNodes, nodes, apiFetch]
+    [screenToFlowPosition, setNodes, nodes]
   );
 
   /* ---- Handlers ---- */

@@ -70,6 +70,23 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
   const mainLightRef = useRef<THREE.DirectionalLight | null>(null);
   const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
 
+  const renderScene = useCallback(() => {
+    const renderer = rendererRef.current;
+    const scene = sceneRef.current;
+    const camera = cameraRef.current;
+    if (!renderer || !scene || !camera) return;
+    controlsRef.current?.update();
+    renderer.render(scene, camera);
+  }, []);
+
+  const scheduleRender = useCallback(() => {
+    if (frameIdRef.current) return;
+    frameIdRef.current = requestAnimationFrame(() => {
+      frameIdRef.current = 0;
+      renderScene();
+    });
+  }, [renderScene]);
+
   const disposeThree = useCallback(() => {
     cancelAnimationFrame(frameIdRef.current);
     frameIdRef.current = 0;
@@ -78,6 +95,7 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
       modelRef.current = null;
     }
     if (controlsRef.current) {
+      controlsRef.current.removeEventListener('change', scheduleRender);
       controlsRef.current.dispose();
       controlsRef.current = null;
     }
@@ -92,7 +110,7 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
     mainLightRef.current = null;
     fillLightRef.current = null;
     initDoneRef.current = false;
-  }, []);
+  }, [scheduleRender]);
 
   // Initialize Three.js scene
   const initThree = useCallback(() => {
@@ -120,8 +138,8 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
     cameraRef.current = camera;
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
+    controls.enableDamping = false;
+    controls.addEventListener('change', scheduleRender);
     controlsRef.current = controls;
 
     // Lights
@@ -137,15 +155,9 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
     scene.add(dir2);
     fillLightRef.current = dir2;
 
-    const animate = () => {
-      frameIdRef.current = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    animate();
-
     initDoneRef.current = true;
-  }, []);
+    scheduleRender();
+  }, [scheduleRender]);
 
   // Effect 1: Initialize Three.js once
   useEffect(() => {
@@ -180,7 +192,8 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
     if (renderer) {
       renderer.toneMappingExposure = lightParams.exposure;
     }
-  }, [lightParams]);
+    scheduleRender();
+  }, [lightParams, scheduleRender]);
 
   // Effect 2: Handle resize
   useEffect(() => {
@@ -197,11 +210,12 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
       renderer.setSize(width, height);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      scheduleRender();
     });
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [scheduleRender]);
 
   // Effect 3: Load model when url/type changes
   useEffect(() => {
@@ -236,7 +250,7 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
       // Step 2: Compute bounding box from world-space geometry
       const box = new THREE.Box3();
       object.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.geometry) {
+        if ((child instanceof THREE.Mesh || child instanceof THREE.Points) && child.geometry) {
           sanitizeGeometry(child.geometry);
           child.geometry.computeBoundingBox();
           if (child.geometry.boundingBox) {
@@ -260,10 +274,10 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
       // Step 4: Recompute bounding box from clean local-space geometry
       const localBox = new THREE.Box3();
       object.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.geometry) {
+        if ((child instanceof THREE.Mesh || child instanceof THREE.Points) && child.geometry) {
           child.geometry.computeBoundingBox();
           if (child.geometry.boundingBox) {
-            localBox.union(child.geometry.boundingBox);
+            localBox.union(child.geometry.boundingBox.clone().applyMatrix4(child.matrixWorld));
           }
         }
       });
@@ -294,6 +308,7 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
       }
 
       setStatus('ready');
+      scheduleRender();
     };
 
     const onError = () => {
@@ -407,7 +422,7 @@ export default function ModelViewer({ modelUrl, modelType, className = '', light
         onError
       );
     }
-  }, [modelUrl, modelType, initThree, disposeThree]);
+  }, [modelUrl, modelType, initThree, disposeThree, scheduleRender]);
 
   // Cleanup on unmount
   useEffect(() => {

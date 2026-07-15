@@ -64,7 +64,53 @@ def copy_sparse(src_dir: Path, dst_dir: Path) -> None:
             shutil.copy2(src, dst_dir / name)
 
 
-def prepare_nerfstudio_dataset(images_dir: Path, sparse_dir: Path, dataset_dir: Path) -> int:
+def copy_masks(src_dir: Path, dst_dir: Path) -> set[str]:
+    copied: set[str] = set()
+    if not src_dir.exists():
+        return copied
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(src_dir.iterdir()):
+        if src.is_file() and src.suffix.lower() == ".png":
+            shutil.copy2(src, dst_dir / src.name)
+            copied.add(src.stem)
+    return copied
+
+
+def attach_masks_to_transforms(dataset_dir: Path, mask_stems: set[str]) -> int:
+    if not mask_stems:
+        return 0
+    transforms_path = dataset_dir / "transforms.json"
+    if not transforms_path.exists():
+        return 0
+
+    with transforms_path.open("r", encoding="utf-8") as handle:
+        transforms = json.load(handle)
+
+    frames = transforms.get("frames")
+    if not isinstance(frames, list):
+        return 0
+
+    attached = 0
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        file_path = frame.get("file_path")
+        if not isinstance(file_path, str):
+            continue
+        stem = Path(file_path).stem
+        if stem not in mask_stems:
+            continue
+        frame["mask_path"] = f"masks/{stem}.png"
+        attached += 1
+
+    with transforms_path.open("w", encoding="utf-8") as handle:
+        json.dump(transforms, handle, indent=2)
+        handle.write("\n")
+
+    return attached
+
+
+def prepare_nerfstudio_dataset(images_dir: Path, sparse_dir: Path, dataset_dir: Path, masks_dir: Path | None) -> int:
     try:
         from nerfstudio.process_data.colmap_utils import colmap_to_json
     except Exception as exc:  # pragma: no cover - depends on external install
@@ -74,15 +120,25 @@ def prepare_nerfstudio_dataset(images_dir: Path, sparse_dir: Path, dataset_dir: 
         ) from exc
 
     images_out = dataset_dir / "images"
+    masks_out = dataset_dir / "masks"
     sparse_out = dataset_dir / "colmap" / "sparse" / "0"
     copy_images(images_dir, images_out)
     copy_sparse(sparse_dir, sparse_out)
+    mask_stems = copy_masks(masks_dir, masks_out) if masks_dir else set()
     if not any(images_out.iterdir()):
         raise RuntimeError(f"No images found in {images_dir}")
     if not ((sparse_out / "cameras.bin").exists() and (sparse_out / "images.bin").exists()):
         raise RuntimeError(f"COLMAP sparse reconstruction is incomplete: {sparse_dir}")
 
-    return int(colmap_to_json(sparse_out, dataset_dir, ply_filename="sparse_pc.ply"))
+    registered_images = int(colmap_to_json(sparse_out, dataset_dir, ply_filename="sparse_pc.ply"))
+    attached_masks = attach_masks_to_transforms(dataset_dir, mask_stems)
+    if mask_stems:
+        emit(
+            status="progress",
+            progress=f"Attached foreground masks to {attached_masks}/{registered_images} training frames...",
+            progressStep=5,
+        )
+    return registered_images
 
 
 def parse_training_iteration(line: str, max_iterations: int) -> int | None:
@@ -276,10 +332,12 @@ def main() -> None:
     parser.add_argument("--device", choices=("cuda", "mps", "cpu"), default="cpu", help="Nerfstudio training device")
     parser.add_argument("--ns-train", default="ns-train", help="Path to ns-train")
     parser.add_argument("--ns-export", default="ns-export", help="Path to ns-export")
+    parser.add_argument("--masks-dir", default=None, help="Optional foreground mask directory matching image stems")
     args = parser.parse_args()
 
     images_dir = Path(args.images_dir).resolve()
     sparse_dir = Path(args.sparse_dir).resolve()
+    masks_dir = Path(args.masks_dir).resolve() if args.masks_dir else None
     output_dir = Path(args.output_dir).resolve()
     dataset_dir = output_dir / "nerfstudio-data"
     train_root = output_dir / "nerfstudio-runs"
@@ -294,7 +352,7 @@ def main() -> None:
         subprocess_env = create_nerfstudio_device_patch(output_dir / "runtime-patches")
 
     emit(status="progress", progress="Preparing Nerfstudio COLMAP dataset...", progressStep=5)
-    registered_images = prepare_nerfstudio_dataset(images_dir, sparse_dir, dataset_dir)
+    registered_images = prepare_nerfstudio_dataset(images_dir, sparse_dir, dataset_dir, masks_dir)
     if registered_images < 2:
         raise RuntimeError(f"COLMAP registered only {registered_images} image(s); true 3DGS training needs multiple posed views.")
 

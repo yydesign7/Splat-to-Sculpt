@@ -11,6 +11,7 @@ export interface PointCloudTask {
   activePid?: number;
   enableDepthFusion?: boolean;
   enableSegmentation?: boolean;
+  enableForegroundMask?: boolean;
   /** Browser session id for publishing PLY under .data/ephemeral/<id>/ */
   ephemeralSessionId?: string;
   result?: {
@@ -22,6 +23,7 @@ export interface PointCloudTask {
     colmapImagesDir?: string;
     colmapSparseDir?: string;
     colmapDatabasePath?: string;
+    colmapMasksDir?: string;
   };
   error?: string;
 }

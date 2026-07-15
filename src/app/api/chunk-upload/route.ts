@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { mkdir, writeFile, appendFile, readFile, rm, stat } from 'fs/promises';
-import { existsSync } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import {

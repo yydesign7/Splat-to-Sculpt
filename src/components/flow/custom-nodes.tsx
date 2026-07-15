@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { Handle, Position, useReactFlow, type NodeProps, type Node } from '@xyflow/react';
 import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Layers, Video, Film, Palette, Box, Check, RotateCcw, StickyNote, Download, Sparkles, Orbit, Brush, Eraser } from 'lucide-react';
 import { getNodeConfig, getNodeVisualTheme, NODE_WIDTH, VIDEO_PREVIEW_NODE_WIDTH } from '@/lib/node-config';
@@ -8,6 +8,7 @@ import { mergeLayerGlbsInBrowser, isGltfLikeUrl, type LayerGlbEntry } from '@/li
 import { inferModelTypeFromUrl as inferModelType } from '@/lib/infer-model-type-from-url';
 import { useWorkflow } from '@/lib/workflow-context';
 import dynamic from 'next/dynamic';
+import { DynamicPreviewImage } from './DynamicPreviewImage';
 
 /** Record a model generation event to the history API */
 async function recordModelHistory(params: {
@@ -332,6 +333,7 @@ type GaussianSplatNodeData = Node<{
   targetPlyType: string | null;
   trueTrainingAvailable?: boolean | null;
   trueTrainingUnavailableReason?: string | null;
+  enableFastSegmentation?: boolean;
   layerFiles: string[];
   layerNames: string[];
 }>;
@@ -721,7 +723,7 @@ function HandleBar({ ports, children }: { ports: PortDef[]; children?: React.Rea
 
       {/* Left column: target label rows */}
       <div className="flex flex-1 flex-col" style={{ paddingTop: PAD, paddingBottom: PAD }}>
-        {targets.map((p, i) => (
+        {targets.map((p) => (
           <div
             key={p.id}
             className="flex items-center pl-2.5 leading-none"
@@ -736,7 +738,7 @@ function HandleBar({ ports, children }: { ports: PortDef[]; children?: React.Rea
 
       {/* Right column: source label rows */}
       <div className="flex flex-1 flex-col items-end" style={{ paddingTop: PAD, paddingBottom: PAD }}>
-        {sources.map((p, i) => (
+        {sources.map((p) => (
           <div
             key={p.id}
             className="flex items-center justify-end pr-2.5 leading-none"
@@ -1178,7 +1180,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
         >
           <PreviewBox className="h-[140px]" placeholder="Click to upload video">
             {localCover ? (
-              <img src={localCover} alt="Video cover" className="h-full w-full object-cover" draggable={false} />
+              <DynamicPreviewImage src={localCover} alt="Video cover" className="h-full w-full object-cover" draggable={false} />
             ) : localVideoUrl ? (
               <video src={localVideoUrl} className="h-full w-full object-contain" muted playsInline />
             ) : (
@@ -1354,7 +1356,7 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
           {localFrames.length > 0 && (
             <div className="grid h-full w-full grid-cols-3 gap-0.5 p-0.5">
               {localFrames.slice(0, 6).map((frame, i) => (
-                <img key={i} src={frame} alt={`Frame ${i + 1}`} className="h-full w-full object-cover" />
+                <DynamicPreviewImage key={i} src={frame} alt={`Frame ${i + 1}`} className="h-full w-full object-cover" />
               ))}
             </div>
           )}
@@ -1489,6 +1491,9 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
   const [trueTrainingUnavailableReason, setTrueTrainingUnavailableReason] = useState<string | null>(
     data.trueTrainingUnavailableReason ?? null
   );
+  const [enableFastSegmentation, setEnableFastSegmentation] = useState(
+    typeof data.enableFastSegmentation === 'boolean' ? data.enableFastSegmentation : true
+  );
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [plyUploading, setPlyUploading] = useState(false);
   const deviceDetectionStartedRef = useRef(false);
@@ -1525,8 +1530,13 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     if (data.trueTrainingUnavailableReason !== trueTrainingUnavailableReason) {
       setTrueTrainingUnavailableReason(data.trueTrainingUnavailableReason ?? null);
     }
+    const incomingEnableFastSegmentation =
+      typeof data.enableFastSegmentation === 'boolean' ? data.enableFastSegmentation : true;
+    if (incomingEnableFastSegmentation !== enableFastSegmentation) {
+      setEnableFastSegmentation(incomingEnableFastSegmentation);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.framePaths, data.sourcePlyUrl, data.splatUrl, data.gaussianCount, data.status, data.progressText, data.progressStep, data.errorMessage, data.trainingIterations, data.currentTrainingIteration, data.maxTrainingIterations, data.activeTaskId, data.deviceType, data.computeBackend, data.trainingMode, data.targetPlyType, data.trueTrainingAvailable, data.trueTrainingUnavailableReason]);
+  }, [data.framePaths, data.sourcePlyUrl, data.splatUrl, data.gaussianCount, data.status, data.progressText, data.progressStep, data.errorMessage, data.trainingIterations, data.currentTrainingIteration, data.maxTrainingIterations, data.activeTaskId, data.deviceType, data.computeBackend, data.trainingMode, data.targetPlyType, data.trueTrainingAvailable, data.trueTrainingUnavailableReason, data.enableFastSegmentation]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -1551,6 +1561,21 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
       )
     );
   }, [id, setNodes, status]);
+
+  const updateEnableFastSegmentation = useCallback((value: boolean) => {
+    if (status === 'processing') return;
+    setEnableFastSegmentation(value);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? { ...n, data: { ...n.data, enableFastSegmentation: value } }
+          : n
+      )
+    );
+  }, [id, setNodes, status]);
+
+  const hasPlyOnlyInput = !!sourcePlyUrl && framePaths.length === 0;
+  const effectiveTrainingMode: GaussianTrainingMode = hasPlyOnlyInput ? 'auto' : trainingMode;
 
   useEffect(() => {
     if (deviceDetectionStartedRef.current) return;
@@ -1608,6 +1633,11 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     if (trueTrainingAvailable !== false || trainingMode !== 'train') return;
     updateTrainingMode('auto');
   }, [trainingMode, trueTrainingAvailable, updateTrainingMode]);
+
+  useEffect(() => {
+    if (!hasPlyOnlyInput || trainingMode !== 'train') return;
+    updateTrainingMode('auto');
+  }, [hasPlyOnlyInput, trainingMode, updateTrainingMode]);
 
   useEffect(() => {
     if (status !== 'error' || trueTrainingAvailable !== false || !errorMessage) return;
@@ -1697,6 +1727,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
           setMaxTrainingIterations(null);
           setActiveTaskId(null);
           setComputeBackend(null);
+          setTrainingMode('auto');
           setTargetPlyType(null);
           setNodes((nds) =>
             nds.map((n) =>
@@ -1717,6 +1748,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                       maxTrainingIterations: null,
                       activeTaskId: null,
                       computeBackend: null,
+                      trainingMode: 'auto' as const,
                       targetPlyType: null,
                       layerFiles: [] as string[],
                       layerNames: [] as string[],
@@ -1797,6 +1829,11 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     const hasPly = !!sourcePlyUrl;
     if (status === 'processing' || activeRunIdRef.current) return;
     if ((!hasFrames && !hasPly) || !ephemeralSessionId) return;
+    const requestTrainingMode: GaussianTrainingMode = hasFrames ? trainingMode : 'auto';
+    const requestEnableSegmentation =
+      requestTrainingMode === 'auto' &&
+      enableFastSegmentation &&
+      (hasPly || (hasFrames && deviceType !== 'cuda'));
 
     setStatus('processing');
     setProgressText(hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...');
@@ -1819,7 +1856,8 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                 progressText: hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...',
                 progressStep: 0,
                 errorMessage: null,
-                trainingMode,
+                trainingMode: requestTrainingMode,
+                enableFastSegmentation,
                 currentTrainingIteration: null,
                 maxTrainingIterations: trainingIterations,
                 activeTaskId: null,
@@ -1838,7 +1876,8 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
             framePaths: hasFrames ? framePaths : undefined,
             plyUrl: hasFrames ? undefined : sourcePlyUrl,
             trainingIterations,
-            trainingMode,
+            trainingMode: requestTrainingMode,
+            enableSegmentation: requestEnableSegmentation,
             ephemeralSessionId,
           }),
         });
@@ -2055,7 +2094,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
         );
       }
     })();
-  }, [apiFetch, deviceType, ephemeralSessionId, framePaths, id, setNodes, sourcePlyUrl, status, targetPlyType, trainingIterations, trainingMode]);
+  }, [apiFetch, deviceType, enableFastSegmentation, ephemeralSessionId, framePaths, id, setNodes, sourcePlyUrl, status, targetPlyType, trainingIterations, trainingMode]);
 
   useEffect(() => {
     if (!workflowRunning) return;
@@ -2117,10 +2156,16 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     : 0;
   const hasGaussianPreviewFile = framePaths.length > 0 || !!sourcePlyUrl || !!splatUrl;
   const displayDeviceType = deviceType ? deviceType.toUpperCase() : 'detecting';
-  const displayTargetPlyType = targetPlyType || getGaussianTargetPlyLabel(deviceType, trainingMode);
+  const displayTargetPlyType = targetPlyType || (hasPlyOnlyInput
+    ? 'initializer splat PLY from uploaded PLY'
+    : getGaussianTargetPlyLabel(deviceType, effectiveTrainingMode));
   const canChooseTrainingMode = deviceType === 'mps' || deviceType === 'cpu';
-  const trueTrainingDisabled = status === 'processing' || trueTrainingAvailable !== true;
-  const trueTrainingReason = trueTrainingUnavailableReason || 'True training requires a CUDA-compatible gsplat runtime.';
+  const trueTrainingDisabled = status === 'processing' || hasPlyOnlyInput || trueTrainingAvailable !== true;
+  const trueTrainingReason = hasPlyOnlyInput
+    ? 'True training requires extracted frames and COLMAP camera poses.'
+    : trueTrainingUnavailableReason || 'True training requires a CUDA-compatible gsplat runtime.';
+  const canToggleFastSegmentation = status !== 'processing';
+  const showFastSegmentationControl = effectiveTrainingMode === 'auto' && (deviceType !== 'cuda' || hasPlyOnlyInput);
 
   return (
     <div
@@ -2283,7 +2328,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                   updateTrainingMode('auto');
                 }}
                 className={`nodrag nopan px-2 py-1.5 transition-colors ${
-                  trainingMode === 'auto'
+                  effectiveTrainingMode === 'auto'
                     ? 'bg-[#6f5aa8] text-white'
                     : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
                 } ${status === 'processing' ? 'cursor-not-allowed opacity-60' : ''}`}
@@ -2299,7 +2344,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                   updateTrainingMode('train');
                 }}
                 className={`nodrag nopan border-l border-zinc-700 px-2 py-1.5 transition-colors ${
-                  trainingMode === 'train'
+                  effectiveTrainingMode === 'train'
                     ? 'bg-[#6f5aa8] text-white'
                     : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
                 } ${trueTrainingDisabled ? 'cursor-not-allowed opacity-45 hover:bg-transparent hover:text-zinc-400' : ''}`}
@@ -2308,10 +2353,41 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
               </button>
             </div>
           )}
-          {canChooseTrainingMode && trueTrainingAvailable === false && (
+          {canChooseTrainingMode && (trueTrainingAvailable === false || hasPlyOnlyInput) && (
             <p className="text-[9px] leading-snug text-zinc-500">
               True training unavailable: {trueTrainingReason}
             </p>
+          )}
+          {showFastSegmentationControl && (
+            <div className="flex items-center justify-between gap-2 rounded border border-zinc-700/70 bg-zinc-900/45 px-2 py-1.5">
+              <div className="min-w-0">
+                <span className="block text-[10px] text-zinc-300">Auto layers</span>
+                <span className="block text-[9px] leading-snug text-zinc-500">
+                  Fast initializer point cloud
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={enableFastSegmentation}
+                disabled={!canToggleFastSegmentation}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  updateEnableFastSegmentation(!enableFastSegmentation);
+                }}
+                className={`nodrag nopan relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
+                  enableFastSegmentation
+                    ? 'border-[#6f5aa8] bg-[#6f5aa8]'
+                    : 'border-zinc-600 bg-zinc-800'
+                } ${canToggleFastSegmentation ? 'cursor-pointer' : 'cursor-not-allowed opacity-45'}`}
+              >
+                <span
+                  className={`absolute left-0.5 top-1/2 h-4 w-4 -translate-y-1/2 rounded-full bg-white transition-transform ${
+                    enableFastSegmentation ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
           )}
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-zinc-300">Training steps</span>
@@ -2559,7 +2635,7 @@ export function MaterialNode({ id, data }: NodeProps<MaterialNodeData>) {
               Generating...
             </div>
           ) : textureUrl && status === 'done' ? (
-            <img
+            <DynamicPreviewImage
               src={textureUrl}
               alt="Material preview"
               className="h-full w-full object-cover"
@@ -2787,16 +2863,25 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
     if (organizeStatus === 'idle' && (hasLayerGlbs || hasSingle)) {
       handleOrganize();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowRunning, modelUrl, data.layerGlbUrls, organizeStatus, handleOrganize]);
 
-  // Sync data from upstream changes
+  // Sync data from upstream changes, including global Clear resetting fields to null.
   useEffect(() => {
-    if (data.modelUrl && data.modelUrl !== modelUrl) {
-      setModelUrl(data.modelUrl);
+    if (!data.modelUrl && !data.outputUrl) {
+      for (const url of [modelUrl, outputUrl]) {
+        if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+      }
+      setIsUploading(false);
+      setIsFullscreen(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
+    setModelUrl(data.modelUrl);
+    setOutputUrl(data.outputUrl);
+    setOutputType(data.outputType);
+    setOrganizeStatus(data.organizeStatus || 'idle');
+    setErrorMessage(data.errorMessage);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.modelUrl]);
+  }, [data.modelUrl, data.outputUrl, data.outputType, data.organizeStatus, data.errorMessage]);
 
   const handleFileUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2902,11 +2987,12 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
 
   // Push organized model to downstream when outputUrl changes and organizing is done
   useEffect(() => {
-    if (!outputUrl || organizeStatus !== 'done') return;
+    if (!data.outputUrl || data.organizeStatus !== 'done') return;
+    const downstreamOutputUrl = data.outputUrl;
     const edges = getEdges();
     const downstreamEdges = edges.filter((edge) => edge.source === id);
     if (downstreamEdges.length > 0) {
-      const actualType = outputType || inferModelType(outputUrl) || 'obj';
+      const actualType = data.outputType || inferModelType(downstreamOutputUrl) || 'obj';
       const currentLayerFiles = data.layerFiles || [];
       const currentLayerNames = data.layerNames || [];
       const currentLayerGlbs = data.layerGlbUrls || [];
@@ -2920,14 +3006,13 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
           if (!edge) return n;
           const targetHandle = edge.targetHandle;
           if (targetHandle === 'model-input') {
-            return { ...n, data: { ...n.data, modelUrl: outputUrl, inputType: actualType as 'glb' | 'obj' | 'ply', ...baseUpdate } };
+            return { ...n, data: { ...n.data, modelUrl: downstreamOutputUrl, inputType: actualType as 'glb' | 'obj' | 'ply', ...baseUpdate } };
           }
-          return { ...n, data: { ...n.data, modelUrl: outputUrl, ...baseUpdate } };
+          return { ...n, data: { ...n.data, modelUrl: downstreamOutputUrl, ...baseUpdate } };
         })
       );
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outputUrl, organizeStatus, outputType, id, getEdges, setNodes, data.layerGlbUrls, data.layerNames, data.layerFiles]);
+  }, [data.outputUrl, data.organizeStatus, data.outputType, id, getEdges, setNodes, data.layerGlbUrls, data.layerNames, data.layerFiles]);
 
   // Preview: show outputUrl if organized, otherwise show input modelUrl
   const previewUrl = outputUrl || modelUrl;
@@ -3374,8 +3459,11 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
   );
 
   const layerFiles = data.layerFiles || [];
-  const layerNames = data.layerNames || [];
+  const layerNames = useMemo(() => data.layerNames || [], [data.layerNames]);
   const hasPerLayerGlbs = (data.layerGlbUrls?.length ?? 0) > 0;
+  const layerUrlBForPreview = (data.layerUrlB || {}) as Record<string, string>;
+  const hasLayerPreviewOverrides = Object.values(layerUrlBForPreview).some(Boolean);
+  const shouldUseLayerMergedPreview = hasPerLayerGlbs && (!!selectedLayer || hasLayerPreviewOverrides);
 
   /** Browser-only merged GLB preview for per-layer GLB workflow */
   const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
@@ -3448,10 +3536,10 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
   const autoBlenderAbortRef = useRef<AbortController | null>(null);
 
   // Determine what to show in the preview
-  const previewModelUrl = hasPerLayerGlbs
+  const previewModelUrl = shouldUseLayerMergedPreview
     ? (previewBlobUrl || data.modelUrl)
     : (data.outputModelUrl || data.modelUrl);
-  const previewModelType: 'glb' | 'fbx' | 'obj' | 'ply' | null = hasPerLayerGlbs
+  const previewModelType: 'glb' | 'fbx' | 'obj' | 'ply' | null = shouldUseLayerMergedPreview
     ? previewBlobUrl
       ? 'glb'
       : ((inferModelType(data.modelUrl || '') || 'glb') as 'glb' | 'fbx' | 'obj' | 'ply')
@@ -3511,7 +3599,7 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
 
   // Browser-merge preview (highlight selected layer; cache by selection + per-layer url fingerprint)
   useEffect(() => {
-    if (!hasPerLayerGlbs) {
+    if (!shouldUseLayerMergedPreview) {
       for (const u of previewBlobRevokeQueueRef.current) {
         if (typeof u === 'string' && u.startsWith('blob:')) {
           try {
@@ -3601,7 +3689,7 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
       cancelled = true;
     };
   }, [
-    hasPerLayerGlbs,
+    shouldUseLayerMergedPreview,
     data.layerGlbUrls,
     data.layerNames,
     data.layerUrlA,
@@ -3768,6 +3856,50 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
       setBlenderProcessing(false);
     }
   }, [data.blenderProcessing, blenderProcessing]);
+
+  /** Keep local preview state in sync when the top bar Clear action resets node data. */
+  useEffect(() => {
+    const cleared =
+      !data.modelUrl &&
+      !data.outputModelUrl &&
+      !data.materialPreviewUrl &&
+      (data.layerGlbUrls?.length ?? 0) === 0 &&
+      (data.layerFiles?.length ?? 0) === 0;
+    if (!cleared) return;
+
+    autoBlenderAbortRef.current?.abort();
+    for (const u of previewBlobRevokeQueueRef.current) {
+      if (typeof u === 'string' && u.startsWith('blob:')) scheduleRevokeBlobUrl(u);
+    }
+    previewBlobRevokeQueueRef.current = [];
+    for (const url of mergeCacheRef.current.entries.values()) {
+      if (url.startsWith('blob:')) scheduleRevokeBlobUrl(url);
+    }
+    mergeCacheRef.current = { fp: '', entries: new Map() };
+    if (previewBlobUrl?.startsWith('blob:')) scheduleRevokeBlobUrl(previewBlobUrl);
+    setPreviewBlobUrl(null);
+    setPreviewMergeBusy(false);
+    setSelectedLayer(null);
+    setDetectedLayers([]);
+    setLayerParams({});
+    setBlenderProcessing(false);
+    setBlenderError(null);
+    setObjFileName(null);
+    setTextureFileName(null);
+    setIsUploading(false);
+    setIsFullscreen(false);
+    prevUpstreamGlbKeyRef.current = '';
+    if (objFileInputRef.current) objFileInputRef.current.value = '';
+    if (textureInputRef.current) textureInputRef.current.value = '';
+  }, [
+    data.modelUrl,
+    data.outputModelUrl,
+    data.materialPreviewUrl,
+    data.layerGlbUrls,
+    data.layerFiles,
+    previewBlobUrl,
+    scheduleRevokeBlobUrl,
+  ]);
 
   useEffect(
     () => () => {
@@ -4327,7 +4459,7 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
           )
         );
       });
-  }, [id, data, data.layerUrlA, data.layerUrlB, selectedLayer, layerParams, layerNames, detectedLayers, setNodes, lightParams, apiFetch]);
+  }, [id, data, selectedLayer, layerParams, layerNames, detectedLayers, setNodes, lightParams, apiFetch]);
 
   // Helper: RGB array to hex string for color input
   const rgbToHex = (rgb: [number, number, number]): string => {
@@ -4817,48 +4949,39 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     return () => window.clearTimeout(t);
   }, [modelUrl, data.layerFiles, data.layerNames, inputType]);
 
-  // Sync from upstream data changes
+  // Sync from upstream data changes, including global Clear resetting fields to null.
   useEffect(() => {
-    if (data.modelUrl && data.modelUrl !== modelUrl) {
-      setModelUrl(data.modelUrl);
+    if (!data.modelUrl && !data.outputUrl && !data.renderUrl) {
+      for (const url of [modelUrl, outputUrl, renderUrl, textureUrl]) {
+        if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+      }
+      setIsUploading(false);
+      setIsFullscreen(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
-    if (data.inputType && data.inputType !== inputType) {
-      setInputType(data.inputType);
-    }
-    if (data.textureUrl && data.textureUrl !== textureUrl) {
-      setTextureUrl(data.textureUrl);
-    }
-    if (data.meshStatus && data.meshStatus !== meshStatus) {
-      setMeshStatus(data.meshStatus);
-    }
-    if (data.outputUrl && data.outputUrl !== outputUrl) {
-      setOutputUrl(data.outputUrl);
-    }
-    if (data.outputType && data.outputType !== outputType) {
-      setOutputType(data.outputType);
-    }
-    if (data.errorMessage !== errorMessage) {
-      setErrorMessage(data.errorMessage);
-    }
-    if (data.faceCount !== faceCount) {
-      setFaceCount(data.faceCount);
-    }
-    if (data.gaussianCount !== gaussianCount) {
-      setGaussianCount(data.gaussianCount);
-    }
-    if (data.computeBackend !== computeBackend) {
-      setComputeBackend(data.computeBackend);
-    }
-    if (data.lightParams && data.lightParams !== lightParams) {
-      setLightParams(data.lightParams);
-    }
+    setModelUrl(data.modelUrl);
+    setInputType(data.inputType);
+    setTextureUrl(data.textureUrl);
+    setMeshStatus(data.meshStatus || 'idle');
+    setOutputUrl(data.outputUrl);
+    setOutputType(data.outputType);
+    setOutputFormat(data.outputFormat || 'glb');
+    setErrorMessage(data.errorMessage);
+    setFaceCount(data.faceCount);
+    setGaussianCount(data.gaussianCount);
+    setComputeBackend(data.computeBackend);
+    setRenderUrl(data.renderUrl);
+    setLightParams(data.lightParams || null);
+    setLayerGlbUrls(data.layerGlbUrls || []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.modelUrl, data.inputType, data.textureUrl, data.meshStatus, data.outputUrl, data.outputType, data.errorMessage, data.faceCount, data.gaussianCount, data.computeBackend, data.lightParams]);
+  }, [data.modelUrl, data.inputType, data.textureUrl, data.meshStatus, data.outputUrl, data.outputType, data.outputFormat, data.errorMessage, data.faceCount, data.gaussianCount, data.computeBackend, data.renderUrl, data.lightParams, data.layerGlbUrls]);
 
   // Push model output to downstream nodes when mesh generation is done
   useEffect(() => {
-    if (meshStatus === 'done' && outputUrl) {
-      if (outputType === 'splat') return;
+    if (data.meshStatus === 'done' && data.outputUrl) {
+      const downstreamOutputUrl = data.outputUrl;
+      const downstreamOutputType = data.outputType;
+      if (downstreamOutputType === 'splat') return;
       const edges = getEdges();
       const downstreamEdges = edges.filter(
         (edge) => edge.source === id && edge.sourceHandle === 'output'
@@ -4877,26 +5000,26 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
             const targetHandle = edge.targetHandle;
             if (targetHandle === 'model-input') {
               // Determine input type based on output model type
-              const derivedInputType = outputType === 'ply' ? 'ply' as const : (outputType === 'glb' ? 'glb' as const : 'obj' as const);
+              const derivedInputType = downstreamOutputType === 'ply' ? 'ply' as const : (downstreamOutputType === 'glb' ? 'glb' as const : 'obj' as const);
               return {
                 ...n,
                 data: {
                   ...n.data,
-                  modelUrl: outputUrl,
+                  modelUrl: downstreamOutputUrl,
                   inputType: derivedInputType,
                   ...(currentLightParams ? { lightParams: currentLightParams } : {}),
                   ...forwardLayers,
                 },
               };
             } else if (targetHandle === 'texture') {
-              return { ...n, data: { ...n.data, textureUrl: outputUrl } };
+              return { ...n, data: { ...n.data, textureUrl: downstreamOutputUrl } };
             } else if (targetHandle === 'obj-input') {
               // All nodes now use modelUrl as their input field
               return {
                 ...n,
                 data: {
                   ...n.data,
-                  modelUrl: outputUrl,
+                  modelUrl: downstreamOutputUrl,
                   ...(currentLightParams ? { lightParams: currentLightParams } : {}),
                   ...forwardLayers,
                 },
@@ -4908,43 +5031,43 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meshStatus, outputUrl, outputType, layerGlbUrls, data.layerNames, data.layerFiles]);
+  }, [data.meshStatus, data.outputUrl, data.outputType, layerGlbUrls, data.layerNames, data.layerFiles]);
 
   // History: once per new output URL. Assets: terminal GLB only, re-evaluated when edges change
   // (separate refs so disconnecting downstream can still publish the same URL to the library).
   const lastHistoryModelUrl = useRef<string | null>(null);
   const lastAssetLibraryModelUrl = useRef<string | null>(null);
   useEffect(() => {
-    if (meshStatus !== 'done' || !outputUrl || isBlobUrl(outputUrl)) return;
+    if (data.meshStatus !== 'done' || !data.outputUrl || isBlobUrl(data.outputUrl)) return;
 
     const sourceLabel = inputType === 'splat' ? 'Gaussian Splat' : inputType === 'ply' ? 'PLY to Mesh' : inputType === 'glb' ? 'GLB Processing' : 'OBJ Processing';
     const thumbnailUrl = renderUrl || data.renderUrl || null;
 
-    if (outputUrl !== lastHistoryModelUrl.current) {
-      lastHistoryModelUrl.current = outputUrl;
+    if (data.outputUrl !== lastHistoryModelUrl.current) {
+      lastHistoryModelUrl.current = data.outputUrl;
       recordModelHistory({
         name: `${sourceLabel}_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
-        modelUrl: outputUrl,
-        modelType: outputType || null,
+        modelUrl: data.outputUrl,
+        modelType: data.outputType || null,
         thumbnailUrl,
         sourceNode: 'modelGeneration',
       });
     }
 
     const hasDownstream = getEdges().some((e) => e.source === id);
-    const isTerminalGlb = outputType === 'glb' && !hasDownstream;
-    if (isTerminalGlb && outputUrl !== lastAssetLibraryModelUrl.current) {
-      lastAssetLibraryModelUrl.current = outputUrl;
+    const isTerminalGlb = data.outputType === 'glb' && !hasDownstream;
+    if (isTerminalGlb && data.outputUrl !== lastAssetLibraryModelUrl.current) {
+      lastAssetLibraryModelUrl.current = data.outputUrl;
       recordAsset({
         name: `${sourceLabel}_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
         assetType: 'model',
-        fileUrl: outputUrl,
+        fileUrl: data.outputUrl,
         fileType: 'glb',
         thumbnailUrl,
         sourceNode: 'modelGeneration',
       });
     }
-  }, [meshStatus, outputUrl, outputType, inputType, renderUrl, data.renderUrl, id, getEdges]);
+  }, [data.meshStatus, data.outputUrl, data.outputType, inputType, renderUrl, data.renderUrl, id, getEdges]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -5537,7 +5660,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
               className="h-full w-full"
             />
           ) : renderUrl && meshStatus === 'done' ? (
-            <img
+            <DynamicPreviewImage
               src={renderUrl}
               alt="Model render"
               className="h-full w-full object-cover"
@@ -5712,7 +5835,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
             </div>
             <div className="h-[calc(85vh-52px)] w-full">
               {renderUrl ? (
-                <img
+                <DynamicPreviewImage
                   src={renderUrl}
                   alt="Model render"
                   className="h-full w-full object-contain"

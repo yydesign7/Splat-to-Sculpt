@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execFile, spawn } from 'child_process';
-import { mkdir, rm } from 'fs/promises';
+import { mkdir, readdir, readFile, rm, stat } from 'fs/promises';
 import { promisify } from 'util';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -38,6 +38,7 @@ type PointCloudStageResult = {
   colmapImagesDir?: string;
   colmapSparseDir?: string;
   colmapDatabasePath?: string;
+  colmapMasksDir?: string;
 };
 
 type GaussianPipelineInput = {
@@ -45,6 +46,7 @@ type GaussianPipelineInput = {
   framePaths?: string[];
   trainingIterations: number;
   trainingMode: GaussianTrainingMode;
+  enableSegmentation: boolean;
   ephemeralSessionId: string;
 };
 
@@ -195,6 +197,52 @@ async function checkPythonRuntime(command: string): Promise<string | null> {
   }
 }
 
+async function checkInitializerPythonRuntime(command: string): Promise<string | null> {
+  try {
+    await execFileAsync(command, ['-c', 'import numpy'], {
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        MPLCONFIGDIR: process.env.MPLCONFIGDIR || '/private/tmp/studio3dgs-matplotlib',
+        XDG_CACHE_HOME: process.env.XDG_CACHE_HOME || '/private/tmp/studio3dgs-cache',
+      },
+    });
+    return null;
+  } catch {
+    return `Python runtime "${command}" cannot import numpy. Set PYTHON_BIN to a Python executable with the project dependencies installed.`;
+  }
+}
+
+async function resolveSegmentationPythonCommand(preferredCommand: string): Promise<string | null> {
+  const candidates = [
+    process.env.POINTCLOUD_PYTHON_BIN,
+    process.env.PYTHON_BIN,
+    preferredCommand,
+    process.env.HOME ? path.join(process.env.HOME, 'miniconda3', 'envs', 'studio3dgs', 'bin', 'python3') : null,
+    'python3',
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      await execFileAsync(candidate, ['-c', 'import open3d'], {
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          MPLCONFIGDIR: process.env.MPLCONFIGDIR || '/private/tmp/studio3dgs-matplotlib',
+          XDG_CACHE_HOME: process.env.XDG_CACHE_HOME || '/private/tmp/studio3dgs-cache',
+        },
+      });
+      return candidate;
+    } catch {
+      // Try the next Python candidate.
+    }
+  }
+  return null;
+}
+
 async function checkTrainerCommand(command: string, kind: 'train' | 'export'): Promise<string | null> {
   const args = kind === 'train' ? ['splatfacto', '--help'] : ['gaussian-splat', '--help'];
   try {
@@ -308,6 +356,7 @@ export async function POST(request: NextRequest) {
     framePaths?: string[];
     trainingIterations?: number;
     trainingMode?: GaussianTrainingMode;
+    enableSegmentation?: boolean;
     ephemeralSessionId?: string;
   };
   const trainingIterations = normalizeTrainingIterations(requestedTrainingIterations);
@@ -318,41 +367,52 @@ export async function POST(request: NextRequest) {
   if (!hasFrames && !hasPly) {
     return NextResponse.json({ error: 'No frame images or point cloud file path provided' }, { status: 400 });
   }
-  if (!hasFrames) {
-    return NextResponse.json(
-      { error: 'True 3DGS training requires extracted frames and COLMAP camera poses. PLY-only input cannot be trained as a real Gaussian splat.' },
-      { status: 400 },
-    );
-  }
   if (!isValidEphemeralSessionId(ephemeralSessionId)) {
     return NextResponse.json({ error: 'Missing or invalid ephemeralSessionId' }, { status: 400 });
   }
 
+  const isPlyOnlyInput = hasPly && !hasFrames;
   const nsTrainCommand = resolveTrainerCommand('NS_TRAIN_BIN', 'ns-train');
   const nsExportCommand = resolveTrainerCommand('NS_EXPORT_BIN', 'ns-export');
-  const pythonCommand = resolvePythonCommand(nsTrainCommand);
-  const pythonError = await checkPythonRuntime(pythonCommand);
+  const pythonCommand = isPlyOnlyInput && !process.env.PYTHON_BIN ? 'python3' : resolvePythonCommand(nsTrainCommand);
+  const pythonError = isPlyOnlyInput
+    ? await checkInitializerPythonRuntime(pythonCommand)
+    : await checkPythonRuntime(pythonCommand);
   if (pythonError) {
     return NextResponse.json({ error: pythonError }, { status: 503 });
   }
-  const trainError = await checkTrainerCommand(nsTrainCommand, 'train');
-  if (trainError) {
-    return NextResponse.json({ error: trainError }, { status: 503 });
-  }
-  const exportError = await checkTrainerCommand(nsExportCommand, 'export');
-  if (exportError) {
-    return NextResponse.json({ error: exportError }, { status: 503 });
+  if (!isPlyOnlyInput) {
+    const trainError = await checkTrainerCommand(nsTrainCommand, 'train');
+    if (trainError) {
+      return NextResponse.json({ error: trainError }, { status: 503 });
+    }
+    const exportError = await checkTrainerCommand(nsExportCommand, 'export');
+    if (exportError) {
+      return NextResponse.json({ error: exportError }, { status: 503 });
+    }
   }
 
   const taskId = randomUUID();
   const backend = await detectComputeBackend(pythonCommand);
-  const trainingSupport = await detectTrueTrainingSupport(pythonCommand, backend);
-  const trainingMode: GaussianTrainingMode =
-    requestedTrainingMode === 'train' && trainingSupport.trueTrainingAvailable ? 'train' : 'auto';
-  const targetPlyType = getTargetPlyType(backend, trainingMode);
-  const computeBackend = requestedTrainingMode === 'train' && trainingMode === 'auto'
-    ? `${backend.label}; true training unavailable, using initializer`
-    : backend.label;
+  const trainingSupport = isPlyOnlyInput
+    ? {
+        trueTrainingAvailable: false,
+        trueTrainingUnavailableReason: 'True training requires extracted frames and COLMAP camera poses.',
+      }
+    : await detectTrueTrainingSupport(pythonCommand, backend);
+  const trainingMode: GaussianTrainingMode = isPlyOnlyInput
+    ? 'auto'
+    : requestedTrainingMode === 'train' && trainingSupport.trueTrainingAvailable ? 'train' : 'auto';
+  const enableSegmentation =
+    trainingMode === 'auto' &&
+    body.enableSegmentation !== false &&
+    (hasPly || (hasFrames && backend.kind !== 'cuda'));
+  const targetPlyType = isPlyOnlyInput ? '3DGS-field initializer splat PLY' : getTargetPlyType(backend, trainingMode);
+  const computeBackend = isPlyOnlyInput && requestedTrainingMode === 'train'
+    ? `${backend.label}; uploaded PLY uses initializer`
+    : requestedTrainingMode === 'train' && trainingMode === 'auto'
+      ? `${backend.label}; true training unavailable, using initializer`
+      : backend.label;
   await setTask(taskId, {
     status: 'processing',
     progress: hasFrames ? 'Initializing reconstruction for Gaussian splat...' : 'Initializing Gaussian splat generation...',
@@ -368,7 +428,7 @@ export async function POST(request: NextRequest) {
 
   runGaussianPipeline(
     taskId,
-    { plyUrl, framePaths, trainingIterations, trainingMode, ephemeralSessionId },
+    { plyUrl, framePaths, trainingIterations, trainingMode, enableSegmentation, ephemeralSessionId },
     request.nextUrl.origin,
     backend,
     { nsTrainCommand, nsExportCommand, pythonCommand },
@@ -433,7 +493,7 @@ async function runPointCloudStage(
   input: GaussianPipelineInput,
 ): Promise<PointCloudStageResult> {
   await setTask(taskId, {
-    progress: 'Starting source geometry reconstruction...',
+    progress: 'Starting dense source geometry reconstruction...',
     progressStep: 1,
   });
 
@@ -442,11 +502,14 @@ async function runPointCloudStage(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       framePaths: input.framePaths,
+      // Use COLMAP sparse reconstruction as the camera/pose foundation, then
+      // continue through dense matching + stereo fusion for a better initializer.
       enableDepthFusion: false,
-      enableSegmentation: false,
+      enableSegmentation: input.enableSegmentation,
+      enableForegroundMask: true,
       ephemeralSessionId: input.ephemeralSessionId,
       preserveColmapWorkspace: true,
-      colmapOnly: true,
+      colmapOnly: false,
     }),
   });
   const started = await response.json();
@@ -462,6 +525,199 @@ async function ensureNotCancelled(taskId: string) {
   const task = await getTask(taskId);
   if (task?.status === 'cancelled') {
     throw new Error('Gaussian splat generation was cancelled');
+  }
+}
+
+async function runGaussianInitializer(params: {
+  taskId: string;
+  input: GaussianPipelineInput;
+  backend: ComputeBackendInfo;
+  pythonCommand: string;
+  sourcePlyUrl: string;
+  progress: string;
+  computeBackend: string;
+  targetPlyType: string;
+  layerFiles?: string[];
+  layerNames?: string[];
+}) {
+  const {
+    taskId,
+    input,
+    backend,
+    pythonCommand,
+    sourcePlyUrl,
+    progress,
+    computeBackend,
+    targetPlyType,
+    layerFiles = [],
+    layerNames = [],
+  } = params;
+  const jobId = randomUUID();
+  const outputDir = path.join(getSessionRoot(input.ephemeralSessionId), 'gaussian-splats', jobId, 'export');
+  await mkdir(outputDir, { recursive: true });
+  await setTask(taskId, {
+    progress,
+    progressStep: 6,
+    deviceType: backend.kind,
+    computeBackend,
+    trainingMode: 'auto',
+    targetPlyType,
+    currentTrainingIteration: undefined,
+    maxTrainingIterations: undefined,
+  });
+
+  const scriptPath = path.join(process.cwd(), 'scripts', 'generate_gaussian_splat.py');
+  const sourcePlyPath = resolveClientMediaUrlToFilesystem(sourcePlyUrl);
+  const { stdout, stderr } = await runGaussianScript(
+    pythonCommand,
+    [
+      scriptPath,
+      '--input',
+      sourcePlyPath,
+      '--output-dir',
+      outputDir,
+      '--device',
+      'cpu',
+    ],
+    {
+      timeout: 600_000,
+      onStart: (pid) => {
+        setTask(taskId, { trainingPid: pid }).catch(() => {});
+      },
+    },
+  );
+
+  await setTask(taskId, { trainingPid: undefined });
+  if (stderr?.trim()) {
+    console.error('[generate-gaussian-splat-initializer] python stderr (tail):\n', stderr.slice(-4000));
+  }
+
+  const result = parseGaussianScriptJson(stdout);
+  if (!result || result.status === 'error') {
+    throw new Error(String(result?.error || `No valid JSON result in Gaussian initializer output. stdout tail: ${stdout.slice(-1000)}`));
+  }
+
+  const outPath = result.outputPath;
+  if (typeof outPath !== 'string' || !outPath) {
+    throw new Error('Gaussian initializer returned no outputPath');
+  }
+
+  const outputFileName = path.basename(outPath);
+  const splatUrl = buildEphemeralFileUrl(input.ephemeralSessionId, `gaussian-splats/${jobId}/export/${outputFileName}`);
+
+  await setTask(taskId, {
+    status: 'done',
+    progress: 'Done',
+    progressStep: 8,
+    deviceType: backend.kind,
+    computeBackend,
+    trainingMode: 'auto',
+    targetPlyType,
+    result: {
+      splatUrl,
+      sourcePlyUrl,
+      gaussianCount: Number(result.gaussianCount) || 0,
+      format: '3dgs-ply',
+      layerFiles,
+      layerNames,
+      computeBackend,
+    },
+  });
+}
+
+async function segmentUploadedPointCloud(
+  taskId: string,
+  input: GaussianPipelineInput,
+  sourcePlyUrl: string,
+  pythonCommand: string,
+): Promise<{ sourcePlyUrl: string; layerFiles: string[]; layerNames: string[] }> {
+  if (!input.enableSegmentation) {
+    return { sourcePlyUrl, layerFiles: [], layerNames: [] };
+  }
+
+  const jobId = randomUUID();
+  const relBase = `gaussian-splats/${jobId}/uploaded-ply-segments`;
+  const segmentDir = path.join(getSessionRoot(input.ephemeralSessionId), relBase);
+  const segmentedPlyPath = path.join(segmentDir, 'output.ply');
+  const layersDir = path.join(segmentDir, 'layers');
+  const segmentScriptPath = path.join(process.cwd(), 'scripts', 'pointcloud_segment.py');
+
+  await setTask(taskId, {
+    progress: 'Segmenting uploaded point cloud...',
+    progressStep: 3,
+    currentTrainingIteration: undefined,
+    maxTrainingIterations: undefined,
+  });
+
+  try {
+    await mkdir(segmentDir, { recursive: true });
+    const segmentationPythonCommand = await resolveSegmentationPythonCommand(pythonCommand);
+    if (!segmentationPythonCommand) {
+      console.error('[uploaded-ply-segmentation] No Python runtime with open3d was found.');
+      return { sourcePlyUrl, layerFiles: [], layerNames: [] };
+    }
+    const sourcePlyPath = resolveClientMediaUrlToFilesystem(sourcePlyUrl);
+    const { stdout, stderr } = await runGaussianScript(
+      segmentationPythonCommand,
+      [
+        segmentScriptPath,
+        '--input',
+        sourcePlyPath,
+        '--output_ply',
+        segmentedPlyPath,
+        '--layers_dir',
+        layersDir,
+        '--mode',
+        'segment_all',
+      ],
+      {
+        timeout: 300_000,
+        onStart: (pid) => {
+          setTask(taskId, { trainingPid: pid }).catch(() => {});
+        },
+      },
+    );
+
+    await setTask(taskId, { trainingPid: undefined });
+    if (stdout.trim()) console.log('[uploaded-ply-segmentation]', stdout.slice(-4000));
+    if (stderr.trim()) console.error('[uploaded-ply-segmentation stderr]', stderr.slice(-4000));
+
+    const outputStat = await stat(segmentedPlyPath);
+    if (outputStat.size <= 100) {
+      return { sourcePlyUrl, layerFiles: [], layerNames: [] };
+    }
+
+    let layerFiles: string[] = [];
+    let layerNames: string[] = [];
+    try {
+      const layerEntries = await readdir(layersDir);
+      const plyFiles = layerEntries.filter((entry) => entry.toLowerCase().endsWith('.ply')).sort();
+      layerFiles = plyFiles.map((fileName) =>
+        buildEphemeralFileUrl(input.ephemeralSessionId, `${relBase}/layers/${fileName}`),
+      );
+
+      if (layerEntries.includes('layers_meta.json')) {
+        const metaRaw = await readFile(path.join(layersDir, 'layers_meta.json'), 'utf-8');
+        const meta = JSON.parse(metaRaw) as { layers?: Array<{ name?: string }> };
+        if (Array.isArray(meta.layers)) {
+          layerNames = meta.layers.map((layer, index) => layer.name || `layer_${index}`);
+        }
+      }
+    } catch {
+      layerFiles = [];
+      layerNames = [];
+    }
+
+    return {
+      sourcePlyUrl: buildEphemeralFileUrl(input.ephemeralSessionId, `${relBase}/output.ply`),
+      layerFiles,
+      layerNames,
+    };
+  } catch (error: unknown) {
+    await setTask(taskId, { trainingPid: undefined });
+    const message = error instanceof Error ? error.message : 'Uploaded point cloud segmentation failed';
+    console.error('[uploaded-ply-segmentation] Error (non-fatal):', message);
+    return { sourcePlyUrl, layerFiles: [], layerNames: [] };
   }
 }
 
@@ -487,6 +743,28 @@ async function runGaussianPipeline(
     let layerFiles: string[] = [];
     let layerNames: string[] = [];
 
+    if (sourcePlyUrl && (!input.framePaths || input.framePaths.length === 0)) {
+      await ensureNotCancelled(taskId);
+      const segmentedInput = await segmentUploadedPointCloud(taskId, input, sourcePlyUrl, trainer.pythonCommand);
+      await ensureNotCancelled(taskId);
+      sourcePlyUrl = segmentedInput.sourcePlyUrl;
+      layerFiles = segmentedInput.layerFiles;
+      layerNames = segmentedInput.layerNames;
+      await runGaussianInitializer({
+        taskId,
+        input,
+        backend,
+        pythonCommand: trainer.pythonCommand,
+        sourcePlyUrl,
+        progress: 'Generating Gaussian splat initializer from uploaded point cloud...',
+        computeBackend: `${backend.label}; uploaded point cloud splat initializer`,
+        targetPlyType,
+        layerFiles,
+        layerNames,
+      });
+      return;
+    }
+
     if (!sourcePlyUrl && input.framePaths && input.framePaths.length > 0) {
       await ensureNotCancelled(taskId);
       const pointCloud = await runPointCloudStage(taskId, origin, input);
@@ -500,86 +778,24 @@ async function runGaussianPipeline(
         throw new Error('COLMAP reconstruction completed, but camera/image paths were not returned for 3DGS training');
       }
 
+      const shouldTrainWithNerfstudio = backend.kind === 'cuda' || input.trainingMode === 'train';
       const jobId = randomUUID();
       const jobRoot = path.join(getSessionRoot(input.ephemeralSessionId), 'gaussian-splats', jobId);
-      const shouldTrainWithNerfstudio = backend.kind === 'cuda' || input.trainingMode === 'train';
       const outputDir = shouldTrainWithNerfstudio ? jobRoot : path.join(jobRoot, 'export');
       await mkdir(outputDir, { recursive: true });
 
       if (!shouldTrainWithNerfstudio) {
-        await setTask(taskId, {
+        await runGaussianInitializer({
+          taskId,
+          input,
+          backend,
+          pythonCommand: trainer.pythonCommand,
+          sourcePlyUrl,
           progress: 'Generating Gaussian splat initializer from COLMAP point cloud...',
-          progressStep: 6,
-          deviceType: backend.kind,
           computeBackend: `${backend.label}; COLMAP splat initializer fallback`,
-          trainingMode: input.trainingMode,
           targetPlyType,
-          currentTrainingIteration: undefined,
-          maxTrainingIterations: undefined,
-        });
-
-        const scriptPath = path.join(process.cwd(), 'scripts', 'generate_gaussian_splat.py');
-        const sourcePlyPath = resolveClientMediaUrlToFilesystem(sourcePlyUrl);
-        const { stdout, stderr } = await runGaussianScript(
-          trainer.pythonCommand,
-          [
-            scriptPath,
-            '--input',
-            sourcePlyPath,
-            '--output-dir',
-            outputDir,
-            '--device',
-            'cpu',
-          ],
-          {
-            timeout: 600_000,
-            onStart: (pid) => {
-              setTask(taskId, { trainingPid: pid }).catch(() => {});
-            },
-          },
-        );
-
-        await setTask(taskId, { trainingPid: undefined });
-        if (stderr?.trim()) {
-          console.error('[generate-gaussian-splat-fallback] python stderr (tail):\n', stderr.slice(-4000));
-        }
-
-        const result = parseGaussianScriptJson(stdout);
-        if (!result || result.status === 'error') {
-          await setTask(taskId, {
-            status: 'error',
-            error: String(result?.error || `No valid JSON result in Gaussian initializer output. stdout tail: ${stdout.slice(-1000)}`),
-          });
-          return;
-        }
-
-        const outPath = result.outputPath;
-        if (typeof outPath !== 'string' || !outPath) {
-          await setTask(taskId, { status: 'error', error: 'Gaussian initializer returned no outputPath' });
-          return;
-        }
-
-        const outputFileName = path.basename(outPath);
-        const splatUrl = buildEphemeralFileUrl(input.ephemeralSessionId, `gaussian-splats/${jobId}/export/${outputFileName}`);
-        const computeBackend = `${backend.label}; COLMAP splat initializer fallback`;
-
-        await setTask(taskId, {
-          status: 'done',
-          progress: 'Done',
-          progressStep: 8,
-          deviceType: backend.kind,
-          computeBackend,
-          trainingMode: input.trainingMode,
-          targetPlyType,
-          result: {
-            splatUrl,
-            sourcePlyUrl,
-            gaussianCount: Number(result.gaussianCount) || 0,
-            format: '3dgs-ply',
-            layerFiles,
-            layerNames,
-            computeBackend,
-          },
+          layerFiles,
+          layerNames,
         });
         return;
       }
@@ -615,6 +831,7 @@ async function runGaussianPipeline(
           trainer.nsTrainCommand,
           '--ns-export',
           trainer.nsExportCommand,
+          ...(pointCloud.colmapMasksDir ? ['--masks-dir', pointCloud.colmapMasksDir] : []),
         ],
         {
           timeout: 7_200_000,
@@ -693,7 +910,7 @@ async function runGaussianPipeline(
       return;
     }
 
-    throw new Error('True 3DGS training requires extracted frames and COLMAP camera poses; PLY-only initialization has been disabled.');
+    throw new Error('No usable Gaussian splat input was provided.');
   } catch (error: unknown) {
     const currentTask = await getTask(taskId);
     if (currentTask?.status === 'cancelled') {

@@ -255,6 +255,23 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
   const initDoneRef = useRef(false);
   const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(splatUrl ? 'loading' : 'idle');
 
+  const renderScene = useCallback(() => {
+    const renderer = rendererRef.current;
+    const scene = sceneRef.current;
+    const camera = cameraRef.current;
+    if (!renderer || !scene || !camera) return;
+    controlsRef.current?.update();
+    renderer.render(scene, camera);
+  }, []);
+
+  const scheduleRender = useCallback(() => {
+    if (frameIdRef.current) return;
+    frameIdRef.current = requestAnimationFrame(() => {
+      frameIdRef.current = 0;
+      renderScene();
+    });
+  }, [renderScene]);
+
   const disposeThree = useCallback(() => {
     cancelAnimationFrame(frameIdRef.current);
     frameIdRef.current = 0;
@@ -263,6 +280,7 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
       (meshRef.current.material as THREE.Material).dispose();
       meshRef.current = null;
     }
+    controlsRef.current?.removeEventListener('change', scheduleRender);
     controlsRef.current?.dispose();
     controlsRef.current = null;
     if (rendererRef.current) {
@@ -273,7 +291,7 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
     sceneRef.current = null;
     cameraRef.current = null;
     initDoneRef.current = false;
-  }, []);
+  }, [scheduleRender]);
 
   const initThree = useCallback(() => {
     const container = containerRef.current;
@@ -296,18 +314,13 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
     cameraRef.current = camera;
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
+    controls.enableDamping = false;
+    controls.addEventListener('change', scheduleRender);
     controlsRef.current = controls;
 
-    const animate = () => {
-      frameIdRef.current = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    animate();
     initDoneRef.current = true;
-  }, []);
+    scheduleRender();
+  }, [scheduleRender]);
 
   useEffect(() => {
     if (!splatUrl) return;
@@ -327,10 +340,11 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
       renderer.setSize(width, height);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      scheduleRender();
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [scheduleRender]);
 
   useEffect(() => {
     let cancelled = false;
@@ -425,6 +439,7 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
         }
 
         setStatus('ready');
+        scheduleRender();
       } catch {
         if (!cancelled) setStatus('error');
       }
@@ -433,7 +448,7 @@ export default function SplatViewer({ splatUrl, className = '' }: SplatViewerPro
     return () => {
       cancelled = true;
     };
-  }, [splatUrl, initThree, disposeThree]);
+  }, [splatUrl, initThree, disposeThree, scheduleRender]);
 
   useEffect(() => {
     return disposeThree;

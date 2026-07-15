@@ -127,8 +127,7 @@ export interface NodeTriggerInfo {
  */
 export function getNodeTriggerInfo(
   node: Node,
-  edges: Edge[],
-  _allNodes: Node[]
+  edges: Edge[]
 ): NodeTriggerInfo {
   const d = node.data;
   const nodeId = node.id;

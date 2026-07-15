@@ -11,7 +11,6 @@ import {
   Palette,
   Box,
   MonitorPlay,
-  Layers,
   Trash2,
   RefreshCw,
   FolderOpen,
@@ -30,6 +29,7 @@ import {
 } from 'lucide-react';
 import { getNodeVisualTheme, NODE_TYPE_CONFIGS } from '@/lib/node-config';
 import { isListedSidebarAsset } from '@/lib/asset-sidebar-policy';
+import { DynamicPreviewImage } from './DynamicPreviewImage';
 
 interface SidebarProps {
   collapsed: boolean;
@@ -102,7 +102,7 @@ function AssetVisual({ item }: { item: AssetEntry }) {
 
   const smallVisual = item.thumbnailUrl ? (
     <span className="flex h-6 w-9 shrink-0 overflow-hidden rounded border border-zinc-700/70 bg-zinc-950">
-      <img
+      <DynamicPreviewImage
         src={item.thumbnailUrl}
         alt=""
         className="h-full w-full object-cover"
@@ -143,7 +143,7 @@ function AssetVisual({ item }: { item: AssetEntry }) {
               className="block max-h-[150px] max-w-[220px] rounded bg-zinc-950 object-contain"
             />
           ) : (
-            <img
+            <DynamicPreviewImage
               src={item.thumbnailUrl}
               alt=""
               className="block h-32 w-48 rounded bg-zinc-950 object-contain"
