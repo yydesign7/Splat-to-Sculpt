@@ -99,6 +99,7 @@ Desktop.ini
 # Misc
 .vercel
 .turbo
+.worktrees/
 
 .coze-logs
 
