@@ -92,6 +92,7 @@ export async function POST(request: NextRequest) {
     plyUrl?: string;
     outputFormat?: string;
     ephemeralSessionId?: string;
+    reconstructionProfile?: string;
   };
 
   if (!plyUrl) {
@@ -104,6 +105,22 @@ export async function POST(request: NextRequest) {
   const format = outputFormat || 'glb';
   if (!['glb', 'obj', 'ply'].includes(format)) {
     return NextResponse.json({ error: 'Unsupported output format' }, { status: 400 });
+  }
+  const reconstructionProfile = typeof body.reconstructionProfile === 'string'
+    ? body.reconstructionProfile
+    : 'auto';
+  const validReconstructionProfiles = new Set([
+    'auto',
+    'default',
+    'default_general',
+    'closed_solid',
+    'thin_structure',
+    'flat_panel',
+    'high_detail_ornamental',
+    'noisy_scan',
+  ]);
+  if (!validReconstructionProfiles.has(reconstructionProfile)) {
+    return NextResponse.json({ error: 'Unsupported reconstruction profile' }, { status: 400 });
   }
 
   // Check Python dependencies before starting the task
@@ -120,7 +137,7 @@ export async function POST(request: NextRequest) {
   });
 
   // Run mesh generation asynchronously
-  runMeshPipeline(taskId, plyUrl, format, ephemeralSessionId).catch(() => {});
+  runMeshPipeline(taskId, plyUrl, format, ephemeralSessionId, reconstructionProfile).catch(() => {});
 
   return NextResponse.json({
     success: true,
@@ -134,6 +151,7 @@ async function runMeshPipeline(
   plyUrl: string,
   outputFormat: string,
   ephemeralSessionId: string,
+  reconstructionProfile: string,
 ) {
   try {
     await setTask(taskId, { progress: 'Preparing point cloud data...' });
@@ -144,12 +162,22 @@ async function runMeshPipeline(
     const outputDir = path.join(getSessionRoot(ephemeralSessionId), 'meshes', meshJobId);
     await mkdir(outputDir, { recursive: true });
 
-    await setTask(taskId, { progress: 'Running Poisson reconstruction...' });
+    await setTask(taskId, { progress: 'Selecting reconstruction profile...' });
 
     // Run Python mesh generation script
     const scriptPath = path.join(process.cwd(), 'scripts', 'gs_to_mesh.py');
     const { stdout, stderr: stderrText } = await runGsToMesh(
-      [scriptPath, '--input', plyServerPath, '--output-dir', outputDir, '--format', outputFormat],
+      [
+        scriptPath,
+        '--input',
+        plyServerPath,
+        '--output-dir',
+        outputDir,
+        '--format',
+        outputFormat,
+        '--reconstruction-profile',
+        reconstructionProfile,
+      ],
       { timeout: 300_000 }
     );
     if (stderrText?.trim()) {
@@ -201,6 +229,12 @@ async function runMeshPipeline(
         meshFormat: outputFormat,
         faceCount: Number(result.faceCount) || 0,
         vertexCount: Number(result.vertexCount) || 0,
+        reconstructionProfile: typeof result.reconstructionProfile === 'string'
+          ? result.reconstructionProfile
+          : reconstructionProfile,
+        requestedReconstructionProfile: typeof result.requestedReconstructionProfile === 'string'
+          ? result.requestedReconstructionProfile
+          : reconstructionProfile,
       },
     });
   } catch (error: unknown) {

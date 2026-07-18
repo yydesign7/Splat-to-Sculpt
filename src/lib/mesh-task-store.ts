@@ -9,7 +9,14 @@ export interface MeshTask {
   progress: string;
   /** Browser session id for writing mesh under .data/ephemeral/<id>/ */
   ephemeralSessionId?: string;
-  result?: { meshUrl: string; meshFormat: string; faceCount: number; vertexCount: number };
+  result?: {
+    meshUrl: string;
+    meshFormat: string;
+    faceCount: number;
+    vertexCount: number;
+    reconstructionProfile?: string;
+    requestedReconstructionProfile?: string;
+  };
   error?: string;
 }
 

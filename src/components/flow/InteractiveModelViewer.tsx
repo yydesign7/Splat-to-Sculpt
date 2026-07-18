@@ -232,6 +232,8 @@ export default function InteractiveModelViewer({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const frameIdRef = useRef<number>(0);
+  const interactionFrameIdRef = useRef<number>(0);
+  const isInteractionRenderingRef = useRef(false);
   const modelRef = useRef<THREE.Object3D | null>(null);
   const initDoneRef = useRef(false);
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
@@ -312,6 +314,31 @@ export default function InteractiveModelViewer({
     requestAnimationFrame(tick);
   }, [renderScene]);
 
+  const startInteractionRenderLoop = useCallback(() => {
+    if (isInteractionRenderingRef.current) return;
+    isInteractionRenderingRef.current = true;
+
+    const tick = () => {
+      if (!isInteractionRenderingRef.current) {
+        interactionFrameIdRef.current = 0;
+        return;
+      }
+      renderScene();
+      interactionFrameIdRef.current = requestAnimationFrame(tick);
+    };
+
+    interactionFrameIdRef.current = requestAnimationFrame(tick);
+  }, [renderScene]);
+
+  const stopInteractionRenderLoop = useCallback(() => {
+    isInteractionRenderingRef.current = false;
+    if (interactionFrameIdRef.current) {
+      cancelAnimationFrame(interactionFrameIdRef.current);
+      interactionFrameIdRef.current = 0;
+    }
+    scheduleRender();
+  }, [scheduleRender]);
+
   // Track highlight layer in ref for use in animation loop
   useEffect(() => {
     highlightLayerRef.current = highlightLayer ?? null;
@@ -386,6 +413,10 @@ export default function InteractiveModelViewer({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = false;
     controls.addEventListener('change', scheduleRender);
+    renderer.domElement.addEventListener('pointerdown', startInteractionRenderLoop);
+    window.addEventListener('pointerup', stopInteractionRenderLoop);
+    window.addEventListener('pointercancel', stopInteractionRenderLoop);
+    window.addEventListener('blur', stopInteractionRenderLoop);
     controlsRef.current = controls;
 
     // Lights
@@ -403,7 +434,7 @@ export default function InteractiveModelViewer({
 
     initDoneRef.current = true;
     scheduleRender();
-  }, [scheduleRender]);
+  }, [scheduleRender, startInteractionRenderLoop, stopInteractionRenderLoop]);
 
   // Effect: Initialize Three.js once
   useEffect(() => {
@@ -430,7 +461,7 @@ export default function InteractiveModelViewer({
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, [scheduleRender]);
+  }, [scheduleRender, startInteractionRenderLoop, stopInteractionRenderLoop]);
 
   // Effect: Load model when url/type changes
   useEffect(() => {
@@ -890,6 +921,11 @@ export default function InteractiveModelViewer({
   useEffect(() => {
     return () => {
       cancelAnimationFrame(frameIdRef.current);
+      isInteractionRenderingRef.current = false;
+      if (interactionFrameIdRef.current) {
+        cancelAnimationFrame(interactionFrameIdRef.current);
+        interactionFrameIdRef.current = 0;
+      }
       if (modelRef.current) {
         disposeObject3D(modelRef.current);
         modelRef.current = null;
@@ -900,6 +936,10 @@ export default function InteractiveModelViewer({
         controlsRef.current = null;
       }
       if (rendererRef.current) {
+        rendererRef.current.domElement.removeEventListener('pointerdown', startInteractionRenderLoop);
+        window.removeEventListener('pointerup', stopInteractionRenderLoop);
+        window.removeEventListener('pointercancel', stopInteractionRenderLoop);
+        window.removeEventListener('blur', stopInteractionRenderLoop);
         rendererRef.current.dispose();
         if (rendererRef.current.domElement.parentElement) {
           rendererRef.current.domElement.parentElement.removeChild(rendererRef.current.domElement);
@@ -910,7 +950,7 @@ export default function InteractiveModelViewer({
       cameraRef.current = null;
       initDoneRef.current = false;
     };
-  }, [scheduleRender]);
+  }, [scheduleRender, startInteractionRenderLoop, stopInteractionRenderLoop]);
 
   return (
     <div

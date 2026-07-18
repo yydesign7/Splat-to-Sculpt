@@ -17,7 +17,7 @@ import {
   FileVideo,
   FileArchive,
   FileBox,
-  Copy,
+  Download,
   GitBranch,
   Pencil,
   Check,
@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { getNodeVisualTheme, NODE_TYPE_CONFIGS } from '@/lib/node-config';
 import { isListedSidebarAsset } from '@/lib/asset-sidebar-policy';
+import { buildAssetDownloadFilename, downloadAssetFile } from '@/lib/asset-download';
 import { DynamicPreviewImage } from './DynamicPreviewImage';
 
 interface SidebarProps {
@@ -192,7 +193,6 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
   const [bulkDeletingAssets, setBulkDeletingAssets] = useState(false);
   const [bulkDeletingWorkflows, setBulkDeletingWorkflows] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renamingValue, setRenamingValue] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -276,13 +276,12 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
     }
   }, []);
 
-  const handleCopyUrl = useCallback(async (id: string, url: string) => {
+  const handleDownloadAsset = useCallback(async (item: AssetEntry) => {
     try {
-      await navigator.clipboard.writeText(url);
-      setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 1500);
+      const filename = buildAssetDownloadFilename(item.name, item.fileUrl);
+      await downloadAssetFile(item.fileUrl, filename);
     } catch {
-      // Fallback: silently fail
+      // Silently fail if the asset is no longer available.
     }
   }, []);
 
@@ -574,12 +573,12 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
                               <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                                 <button
                                   type="button"
-                                  onClick={() => handleCopyUrl(item.id, item.fileUrl)}
+                                  onClick={() => void handleDownloadAsset(item)}
                                   disabled={bulkDeletingAssets}
                                   className="flex h-[18px] w-[18px] items-center justify-center rounded text-zinc-600 hover:bg-zinc-700 hover:text-zinc-300 disabled:opacity-50"
-                                  title="Copy URL"
+                                  title="Download"
                                 >
-                                  <Copy size={11} />
+                                  <Download size={11} />
                                 </button>
                                 <button
                                   type="button"
@@ -598,9 +597,6 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
                                 {item.fileType}
                               </span>
                             </div>
-                            {copiedId === item.id && (
-                              <span className="text-[10px] text-[#5a8a6a]">URL copied</span>
-                            )}
                           </div>
                         </div>
                       ))}

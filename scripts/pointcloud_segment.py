@@ -20,6 +20,7 @@ bounding box, so the script works for different scene scales without manual tuni
 """
 
 import argparse
+from collections import deque
 import json
 import os
 import sys
@@ -98,6 +99,7 @@ def compute_adaptive_params(pcd: o3d.geometry.PointCloud) -> dict:
             "detail_dbscan_eps": 0.015,
             "detail_plane_distance_threshold": 0.01,
             "detail_min_points": 20,
+            "repeat_grid_cell": 0.02,
             "color_mapping_distance": 0.01,
             "bbox_scale": 1.0,
         }
@@ -119,6 +121,8 @@ def compute_adaptive_params(pcd: o3d.geometry.PointCloud) -> dict:
         # Tighter plane fit for extracting the main body from an object.
         "detail_plane_distance_threshold": max(scale * 0.006, 0.0015),
         "detail_min_points": 20,
+        # XY grid used to find repeated vertical/elongated appendages.
+        "repeat_grid_cell": max(scale * 0.018, 0.003),
         # Color mapping max distance: 3% of bbox diagonal
         "color_mapping_distance": max(scale * 0.03, 0.005),
         "bbox_scale": scale,
@@ -183,6 +187,249 @@ def paint_layer(pcd: o3d.geometry.PointCloud, layer_index: int):
     )
 
 
+def _relative_difference(a: float, b: float) -> float:
+    """Return a scale-safe relative difference for two positive values."""
+    denom = max(abs(a), abs(b), 1e-9)
+    return abs(a - b) / denom
+
+
+def _candidate_point_cloud(source_pcd: o3d.geometry.PointCloud, indices: np.ndarray):
+    """Select points by numpy indices while keeping the implementation readable."""
+    return source_pcd.select_by_index(indices.astype(int).tolist())
+
+
+def _connected_cell_components(cells: set) -> list:
+    """Group occupied 2D grid cells using 8-connected neighborhoods."""
+    remaining = set(cells)
+    components = []
+    neighbors = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
+    while remaining:
+        start = remaining.pop()
+        queue = deque([start])
+        component = {start}
+
+        while queue:
+            cell = queue.popleft()
+            for dx, dy in neighbors:
+                next_cell = (cell[0] + dx, cell[1] + dy)
+                if next_cell in remaining:
+                    remaining.remove(next_cell)
+                    component.add(next_cell)
+                    queue.append(next_cell)
+
+        components.append(component)
+
+    return components
+
+
+def _describe_candidate(points: np.ndarray, total_points: int) -> dict:
+    """Build a compact shape descriptor for comparing repeated parts."""
+    min_bound = points.min(axis=0)
+    max_bound = points.max(axis=0)
+    extents = np.maximum(max_bound - min_bound, 1e-9)
+    xy_area = max(extents[0] * extents[1], 1e-9)
+    xy_diag = float(np.linalg.norm(extents[:2]))
+    return {
+        "point_count": int(len(points)),
+        "point_ratio": float(len(points) / max(total_points, 1)),
+        "height": float(extents[2]),
+        "width": float(extents[0]),
+        "depth": float(extents[1]),
+        "xy_area": float(xy_area),
+        "xy_diag": xy_diag,
+        "center": points.mean(axis=0),
+        "min_bound": min_bound,
+        "max_bound": max_bound,
+    }
+
+
+def _are_repeat_candidates_similar(a: dict, b: dict) -> bool:
+    """Compare simple geometry descriptors for repeat-family grouping."""
+    return (
+        _relative_difference(a["height"], b["height"]) <= 0.45 and
+        _relative_difference(a["xy_area"], b["xy_area"]) <= 0.80 and
+        _relative_difference(a["point_count"], b["point_count"]) <= 0.85
+    )
+
+
+def _group_similar_candidates(candidates: list) -> list:
+    """Greedily group candidates that look like copies of the same local part."""
+    groups = []
+    for candidate in sorted(candidates, key=lambda item: item["desc"]["point_count"], reverse=True):
+        placed = False
+        for group in groups:
+            if all(_are_repeat_candidates_similar(candidate["desc"], existing["desc"]) for existing in group):
+                group.append(candidate)
+                placed = True
+                break
+        if not placed:
+            groups.append([candidate])
+    return groups
+
+
+def extract_repeated_vertical_parts(
+    object_pcd: o3d.geometry.PointCloud,
+    object_index: int,
+    params: dict,
+    layer_start_index: int,
+    progress_cb=None,
+) -> tuple:
+    """
+    Split a single connected object into a main body and repeated elongated parts.
+
+    This is intentionally simple and conservative. It looks for several small
+    XY-footprint regions with large vertical span, then groups similar regions
+    into one repeated-parts layer. If there is not enough repeated evidence,
+    it returns no result and the older body/detail fallback continues.
+    """
+    points = np.asarray(object_pcd.points)
+    point_count = len(points)
+    min_detail_points = max(int(params["detail_min_points"]), int(point_count * 0.015))
+
+    if point_count < max(120, min_detail_points * 4):
+        return [], [], layer_start_index
+
+    min_bound = points.min(axis=0)
+    max_bound = points.max(axis=0)
+    extents = max_bound - min_bound
+    z_extent = float(extents[2])
+    xy_extent = np.maximum(extents[:2], 1e-9)
+    max_xy_extent = float(max(xy_extent))
+
+    if z_extent < params["bbox_scale"] * 0.12 or max_xy_extent <= 0:
+        return [], [], layer_start_index
+
+    # Use an adaptive XY grid so connected posts or repeated small parts become
+    # candidates even when they touch a larger surface at their top.
+    cell_size = max(float(params["repeat_grid_cell"]), max_xy_extent / 48.0, 0.003)
+    xy_cells = np.floor((points[:, :2] - min_bound[:2]) / cell_size).astype(int)
+
+    cell_to_indices = {}
+    for idx, cell in enumerate(map(tuple, xy_cells)):
+        cell_to_indices.setdefault(cell, []).append(idx)
+
+    bottom_seed_cells = set()
+    min_cell_points = max(3, int(point_count * 0.0004))
+    min_vertical_span = max(z_extent * 0.28, params["bbox_scale"] * 0.04)
+    bottom_seed_limit = min_bound[2] + z_extent * 0.32
+
+    for cell, indices in cell_to_indices.items():
+        if len(indices) < min_cell_points:
+            continue
+        cell_points = points[np.asarray(indices, dtype=int)]
+        z_span = float(cell_points[:, 2].max() - cell_points[:, 2].min())
+        if z_span >= min_vertical_span:
+            if float(cell_points[:, 2].min()) <= bottom_seed_limit:
+                bottom_seed_cells.add(cell)
+
+    if len(bottom_seed_cells) < 2:
+        return [], [], layer_start_index
+
+    components = _connected_cell_components(bottom_seed_cells)
+    candidates = []
+    for component in components:
+        candidate_indices = np.asarray(
+            sorted({
+                point_index
+                for cell in component
+                for point_index in cell_to_indices.get(cell, [])
+            }),
+            dtype=int,
+        )
+        if len(candidate_indices) < min_detail_points:
+            continue
+
+        candidate_points = points[candidate_indices]
+        desc = _describe_candidate(candidate_points, point_count)
+        if desc["height"] < min_vertical_span:
+            continue
+        if desc["xy_diag"] > max_xy_extent * 0.38:
+            continue
+        if desc["width"] > xy_extent[0] * 0.42 or desc["depth"] > xy_extent[1] * 0.42:
+            continue
+        if desc["point_ratio"] > 0.35:
+            continue
+
+        # Keep the first pass conservative: this mainly captures repeated
+        # supports/appendages below or through the lower half of the object.
+        bottom_limit = min_bound[2] + z_extent * 0.32
+        center_limit = min_bound[2] + z_extent * 0.62
+        if desc["min_bound"][2] > bottom_limit and desc["center"][2] > center_limit:
+            continue
+
+        candidates.append({
+            "indices": candidate_indices,
+            "desc": desc,
+        })
+
+    if len(candidates) < 2:
+        return [], [], layer_start_index
+
+    groups = _group_similar_candidates(candidates)
+    groups = [group for group in groups if len(group) >= 2]
+    if not groups:
+        return [], [], layer_start_index
+
+    best_group = max(
+        groups,
+        key=lambda group: (len(group), sum(item["desc"]["point_count"] for item in group)),
+    )
+    repeated_indices = np.unique(np.concatenate([item["indices"] for item in best_group]))
+    repeated_ratio = len(repeated_indices) / point_count
+
+    if repeated_ratio < 0.03 or repeated_ratio > 0.55:
+        return [], [], layer_start_index
+
+    body_mask = np.ones(point_count, dtype=bool)
+    body_mask[repeated_indices] = False
+    body_indices = np.where(body_mask)[0]
+    if len(body_indices) < max(min_detail_points, point_count * 0.25):
+        return [], [], layer_start_index
+
+    body_pcd = _candidate_point_cloud(object_pcd, body_indices)
+    repeated_pcd = _candidate_point_cloud(object_pcd, repeated_indices)
+
+    colored_parts = []
+    layer_info = []
+    color_idx = layer_start_index
+
+    body_name = f"object_{object_index}_body"
+    paint_layer(body_pcd, color_idx)
+    colored_parts.append((body_name, body_pcd))
+    layer_info.append({
+        "name": body_name,
+        "type": "body",
+        "subtype": "remaining_main_structure",
+        "point_count": len(body_pcd.points),
+    })
+    color_idx += 1
+
+    repeated_name = f"object_{object_index}_repeated_parts"
+    paint_layer(repeated_pcd, color_idx)
+    colored_parts.append((repeated_name, repeated_pcd))
+    layer_info.append({
+        "name": repeated_name,
+        "type": "repeated_parts",
+        "subtype": "elongated_similar_parts",
+        "part_count": len(best_group),
+        "point_count": len(repeated_pcd.points),
+    })
+    color_idx += 1
+
+    if progress_cb:
+        progress_cb(
+            f"Object {object_index}: grouped {len(best_group)} repeated part(s) "
+            f"({len(repeated_pcd.points)} pts)"
+        )
+
+    return colored_parts, layer_info, color_idx
+
+
 def segment_object_body_details(
     object_pcd: o3d.geometry.PointCloud,
     object_index: int,
@@ -201,6 +448,16 @@ def segment_object_body_details(
 
     if point_count < max(50, min_detail_points * 2):
         return [], [], layer_start_index
+
+    repeated_parts, repeated_info, next_layer_index = extract_repeated_vertical_parts(
+        object_pcd,
+        object_index,
+        params,
+        layer_start_index,
+        progress_cb,
+    )
+    if repeated_parts:
+        return repeated_parts, repeated_info, next_layer_index
 
     body_indices = []
     body_type = ""
