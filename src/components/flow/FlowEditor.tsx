@@ -38,6 +38,7 @@ import { workflowApiFetch } from '@/lib/workflow-api-fetch';
 import { computeDownstreamPushes, isNodeDone } from '@/lib/workflow-engine';
 import { getNodeVisualTheme } from '@/lib/node-config';
 import { initialEdges, initialNodes } from '@/lib/default-workflow';
+import { buildClearedWorkflowGraph } from '@/lib/workflow-clear';
 
 /* ========== Node Types Registry ========== */
 const nodeTypes: NodeTypes = {
@@ -548,16 +549,11 @@ function FlowEditorInner() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     }).catch(() => {});
-    setNodes((nds) =>
-      nds.map((node) => ({
-        ...node,
-        selected: false,
-        dragging: false,
-        data: getClearedNodeData(node),
-      }))
-    );
+    const cleared = buildClearedWorkflowGraph(nodes, edges, getClearedNodeData);
+    setNodes(cleared.nodes);
+    setEdges(cleared.edges);
     setCanvasRevision((value) => value + 1);
-  }, [apiFetch, setNodes]);
+  }, [apiFetch, edges, nodes, setEdges, setNodes]);
 
   /* ---- Save / Load Workflow ---- */
   const handleSaveWorkflow = useCallback(async () => {
