@@ -86,6 +86,26 @@ function runGsToMesh(
   });
 }
 
+function outputPathToMeshJobUrl(
+  filePath: string,
+  outputDir: string,
+  ephemeralSessionId: string,
+  meshJobId: string,
+): string {
+  const relativePath = path.relative(outputDir, filePath);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    throw new Error(`Mesh script returned a file outside the mesh output directory: ${filePath}`);
+  }
+  return buildEphemeralFileUrl(
+    ephemeralSessionId,
+    `meshes/${meshJobId}/${relativePath.split(path.sep).join('/')}`,
+  );
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const { plyUrl, outputFormat, ephemeralSessionId } = body as {
@@ -124,7 +144,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Check Python dependencies before starting the task
-  const depsError = await checkPythonDeps(['open3d', 'numpy']);
+  const depsError = await checkPythonDeps(['open3d', 'numpy', 'trimesh']);
   if (depsError) {
     return NextResponse.json({ error: depsError }, { status: 503 });
   }
@@ -218,8 +238,16 @@ async function runMeshPipeline(
       await setTask(taskId, { status: 'error', error: 'Mesh script returned no outputPath' });
       return;
     }
-    const outputFileName = path.basename(outPath);
-    const meshUrl = buildEphemeralFileUrl(ephemeralSessionId, `meshes/${meshJobId}/${outputFileName}`);
+    const meshUrl = outputPathToMeshJobUrl(outPath, outputDir, ephemeralSessionId, meshJobId);
+    const layerGlbPaths = stringArray(result.layerGlbPaths);
+    const layerNames = stringArray(result.layerNames);
+    const layerGlbUrls = layerGlbPaths.map((layerPath) =>
+      outputPathToMeshJobUrl(layerPath, outputDir, ephemeralSessionId, meshJobId),
+    );
+    const segmentationMetadataUrl =
+      typeof result.segmentationMetadataPath === 'string'
+        ? outputPathToMeshJobUrl(result.segmentationMetadataPath, outputDir, ephemeralSessionId, meshJobId)
+        : undefined;
 
     await setTask(taskId, {
       status: 'done',
@@ -235,6 +263,13 @@ async function runMeshPipeline(
         requestedReconstructionProfile: typeof result.requestedReconstructionProfile === 'string'
           ? result.requestedReconstructionProfile
           : reconstructionProfile,
+        layerGlbUrls,
+        layerNames,
+        segmentationProfile: result.segmentationProfile === 'geometry_graph_surface'
+          ? 'geometry_graph_surface'
+          : undefined,
+        segmentationLabelCount: Number(result.segmentationLabelCount) || layerGlbUrls.length,
+        segmentationMetadataUrl,
       },
     });
   } catch (error: unknown) {

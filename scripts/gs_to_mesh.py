@@ -12,6 +12,7 @@ import open3d as o3d
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 import numpy as np
 import argparse
+import copy
 import os
 import sys
 import json
@@ -20,6 +21,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+import trimesh
+
 # Slightly lower depth: fewer spurious high-frequency sheets on thin parts (e.g. chair legs).
 POISSON_DEPTH = 8
 # Denser trim: remove more low-confidence Poisson vertices (typical "flying" sheets).
@@ -27,6 +30,21 @@ DENSITY_PERCENTILE = 7.0
 # A bit coarser voxels: smoother input, less noise for Poisson to overfit.
 VOXEL_FRAC = 0.0065
 C0 = 0.28209479177387814
+
+GEOMETRY_GRAPH_SURFACE_PROFILE = "geometry_graph_surface"
+
+GEOMETRY_GRAPH_SURFACE_CONFIG: dict[str, float | int] = {
+    "graph_scale_deg": 1200.0,
+    "max_edge_angle_deg": 55.0,
+    "normal_smoothing_iterations": 3,
+    "normal_smoothing_gate_deg": 45.0,
+    "min_region_faces": 500,
+    "min_region_face_ratio": 0.015,
+    "small_region_merge_angle_deg": 180.0,
+    "planar_residual_ratio": 0.008,
+    "curved_internal_angle_deg": 18.0,
+    "max_surface_layers": 8,
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +70,17 @@ class ReconstructionProfile:
     island_fraction: float = 0.0010
     smooth_iterations: int = 1
     smooth_lambda: float = 0.32
+    remove_flying_sheets_enabled: bool = True
+    flying_sheet_support_radius_mult: float = 6.0
+    flying_sheet_support_min_scale: float = 0.004
+    flying_sheet_min_unsupported_vertex_ratio: float = 0.67
+    flying_sheet_max_area_ratio: float = 0.08
+    flying_sheet_max_face_ratio: float = 0.08
+    flying_sheet_min_boundary_ratio: float = 0.08
+    postprocess_max_area_loss_ratio: float = 0.10
+    fill_small_holes_enabled: bool = True
+    small_hole_max_area_ratio: float = 0.002
+    small_hole_max_boundary_edges: int = 80
 
 
 @dataclass(frozen=True)
@@ -84,6 +113,7 @@ RECONSTRUCTION_PROFILES: dict[str, ReconstructionProfile] = {
         orient_k=120,
         orient_mode="consistent_only",
         island_fraction=0.0008,
+        postprocess_max_area_loss_ratio=0.22,
     ),
     "thin_structure": ReconstructionProfile(
         name="thin_structure",
@@ -110,6 +140,9 @@ RECONSTRUCTION_PROFILES: dict[str, ReconstructionProfile] = {
         orient_mode="towards_camera",
         smooth_iterations=1,
         smooth_lambda=0.22,
+        flying_sheet_max_area_ratio=0.025,
+        flying_sheet_max_face_ratio=0.025,
+        postprocess_max_area_loss_ratio=0.03,
     ),
     "high_detail_ornamental": ReconstructionProfile(
         name="high_detail_ornamental",
@@ -437,6 +470,11 @@ def score_reconstruction_profiles(features: dict[str, Any], input_representation
         scores["closed_solid"] += 1.0
     if flatness < 0.10:
         scores["closed_solid"] -= 4.0
+    if plane_ratio > 0.10 and radial_cv > 0.35 and elongation < 1.65:
+        # Chair-like furniture often looks like one clean object in the point cloud,
+        # but it is still an open structure. Avoid Poisson's closed-solid bias there.
+        scores["closed_solid"] -= 3.5
+        scores["default_general"] += 3.0
 
     if thickness_ratio < 0.12 and plane_ratio < 0.45:
         scores["thin_structure"] += 3.0
@@ -565,6 +603,834 @@ def _remove_tiny_island_meshes(
     return mesh
 
 
+def _triangle_areas(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    if len(faces) == 0:
+        return np.zeros(0, dtype=np.float64)
+    a = vertices[faces[:, 0]]
+    b = vertices[faces[:, 1]]
+    c = vertices[faces[:, 2]]
+    return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+
+def _mesh_area(mesh: o3d.geometry.TriangleMesh) -> float:
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.triangles, dtype=np.int64)
+    return float(np.sum(_triangle_areas(vertices, faces)))
+
+
+def count_boundary_edges(mesh: o3d.geometry.TriangleMesh) -> int:
+    faces = np.asarray(mesh.triangles, dtype=np.int64)
+    if len(faces) == 0:
+        return 0
+    edges = np.vstack(
+        [
+            faces[:, [0, 1]],
+            faces[:, [1, 2]],
+            faces[:, [2, 0]],
+        ]
+    )
+    edges = np.sort(edges, axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    return int(np.count_nonzero(counts == 1))
+
+
+def _nearest_source_distances(points: np.ndarray, source_points: np.ndarray) -> np.ndarray:
+    if len(points) == 0:
+        return np.zeros(0, dtype=np.float64)
+    if len(source_points) == 0:
+        return np.full(len(points), np.inf, dtype=np.float64)
+    try:
+        from scipy.spatial import KDTree as SciKDTree
+
+        tree = SciKDTree(source_points)
+        distances, _ = tree.query(points)
+        return np.asarray(distances, dtype=np.float64)
+    except ImportError:
+        source_pcd = o3d.geometry.PointCloud()
+        source_pcd.points = o3d.utility.Vector3dVector(source_points)
+        tree = o3d.geometry.KDTreeFlann(source_pcd)
+        distances = np.zeros(len(points), dtype=np.float64)
+        for i, point in enumerate(points):
+            _, _, squared = tree.search_knn_vector_3d(point, 1)
+            distances[i] = math.sqrt(float(squared[0])) if squared else np.inf
+        return distances
+
+
+def _face_components(face_count: int, adjacency: np.ndarray, mask: np.ndarray) -> list[np.ndarray]:
+    remaining = set(np.flatnonzero(mask).astype(int).tolist())
+    if not remaining:
+        return []
+    neighbors: dict[int, list[int]] = {face_id: [] for face_id in remaining}
+    for first_face, second_face in adjacency:
+        first = int(first_face)
+        second = int(second_face)
+        if first in remaining and second in remaining:
+            neighbors[first].append(second)
+            neighbors[second].append(first)
+
+    components: list[np.ndarray] = []
+    while remaining:
+        start = remaining.pop()
+        stack = [start]
+        component = [start]
+        while stack:
+            current = stack.pop()
+            for other in neighbors.get(current, []):
+                if other in remaining:
+                    remaining.remove(other)
+                    stack.append(other)
+                    component.append(other)
+        components.append(np.asarray(component, dtype=np.int64))
+    return components
+
+
+def _selected_boundary_ratio(faces: np.ndarray) -> float:
+    if len(faces) == 0:
+        return 0.0
+    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    edges = np.sort(edges, axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    return float(np.count_nonzero(counts == 1) / max(1, len(counts)))
+
+
+def remove_flying_sheets(
+    mesh: o3d.geometry.TriangleMesh,
+    source_pcd: o3d.geometry.PointCloud,
+    voxel_size: float,
+    scale: float,
+    profile: ReconstructionProfile,
+) -> tuple[o3d.geometry.TriangleMesh, dict[str, Any]]:
+    if not profile.remove_flying_sheets_enabled:
+        return mesh, {"removed_flying_sheet_faces": 0, "area_loss_ratio": 0.0, "rolled_back": False}
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.triangles, dtype=np.int64)
+    if len(vertices) < 3 or len(faces) < 1:
+        return mesh, {"removed_flying_sheet_faces": 0, "area_loss_ratio": 0.0, "rolled_back": False}
+
+    source_points = np.asarray(source_pcd.points, dtype=np.float64)
+    support_radius = max(
+        float(voxel_size) * profile.flying_sheet_support_radius_mult,
+        float(scale) * profile.flying_sheet_support_min_scale,
+    )
+    vertex_distances = _nearest_source_distances(vertices, source_points)
+    unsupported_vertices = vertex_distances > support_radius
+    face_centroids = np.mean(vertices[faces], axis=1)
+    centroid_distances = _nearest_source_distances(face_centroids, source_points)
+    unsupported_centroids = centroid_distances > support_radius
+    face_unsupported_ratio = np.mean(unsupported_vertices[faces], axis=1)
+    candidate_faces = (
+        (face_unsupported_ratio >= profile.flying_sheet_min_unsupported_vertex_ratio)
+        | unsupported_centroids
+    )
+    if not np.any(candidate_faces):
+        return mesh, {"removed_flying_sheet_faces": 0, "area_loss_ratio": 0.0, "rolled_back": False}
+
+    tm = trimesh.Trimesh(vertices=vertices, faces=faces, process=False, validate=False)
+    adjacency = np.asarray(tm.face_adjacency, dtype=np.int64)
+    face_areas = _triangle_areas(vertices, faces)
+    total_area = float(np.sum(face_areas))
+    total_faces = int(len(faces))
+    remove_mask = np.zeros(total_faces, dtype=bool)
+
+    for component in _face_components(total_faces, adjacency, candidate_faces):
+        component_faces = faces[component]
+        area_ratio = float(np.sum(face_areas[component]) / max(total_area, 1e-12))
+        face_ratio = float(len(component) / max(total_faces, 1))
+        boundary_ratio = _selected_boundary_ratio(component_faces)
+        if (
+            (area_ratio <= profile.flying_sheet_max_area_ratio or face_ratio <= profile.flying_sheet_max_face_ratio)
+            and boundary_ratio >= profile.flying_sheet_min_boundary_ratio
+        ):
+            remove_mask[component] = True
+
+    removed_faces = int(np.count_nonzero(remove_mask))
+    if removed_faces == 0:
+        return mesh, {"removed_flying_sheet_faces": 0, "area_loss_ratio": 0.0, "rolled_back": False}
+
+    removed_area = float(np.sum(face_areas[remove_mask]))
+    area_loss_ratio = removed_area / max(total_area, 1e-12)
+    if area_loss_ratio > profile.postprocess_max_area_loss_ratio:
+        return mesh, {
+            "removed_flying_sheet_faces": 0,
+            "area_loss_ratio": area_loss_ratio,
+            "rolled_back": True,
+        }
+
+    processed = copy.deepcopy(mesh)
+    processed.remove_triangles_by_mask(remove_mask.tolist())
+    processed.remove_unreferenced_vertices()
+    return processed, {
+        "removed_flying_sheet_faces": removed_faces,
+        "area_loss_ratio": area_loss_ratio,
+        "rolled_back": False,
+    }
+
+
+def _boundary_loops(faces: np.ndarray) -> list[list[int]]:
+    if len(faces) == 0:
+        return []
+    edge_counts: dict[tuple[int, int], int] = {}
+    for tri in faces:
+        for a, b in ((int(tri[0]), int(tri[1])), (int(tri[1]), int(tri[2])), (int(tri[2]), int(tri[0]))):
+            edge = tuple(sorted((a, b)))
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+    boundary_edges = [edge for edge, count in edge_counts.items() if count == 1]
+    adjacency: dict[int, list[int]] = {}
+    for a, b in boundary_edges:
+        adjacency.setdefault(a, []).append(b)
+        adjacency.setdefault(b, []).append(a)
+
+    loops: list[list[int]] = []
+    seen_edges: set[tuple[int, int]] = set()
+    for edge in boundary_edges:
+        if edge in seen_edges:
+            continue
+        start, current = edge
+        previous = start
+        loop = [start]
+        seen_edges.add(edge)
+        while True:
+            loop.append(current)
+            next_candidates = [
+                vertex
+                for vertex in adjacency.get(current, [])
+                if vertex != previous and tuple(sorted((current, vertex))) not in seen_edges
+            ]
+            if not next_candidates:
+                if start in adjacency.get(current, []):
+                    closing = tuple(sorted((current, start)))
+                    seen_edges.add(closing)
+                    break
+                loop = []
+                break
+            next_vertex = next_candidates[0]
+            seen_edges.add(tuple(sorted((current, next_vertex))))
+            previous, current = current, next_vertex
+            if current == start:
+                break
+        if len(loop) >= 3 and loop[0] != loop[-1]:
+            loops.append(loop)
+    return loops
+
+
+def _loop_area(points: np.ndarray) -> float:
+    if len(points) < 3:
+        return 0.0
+    centroid = points.mean(axis=0)
+    centered = points - centroid
+    try:
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        basis_x = vh[0]
+        basis_y = vh[1]
+    except np.linalg.LinAlgError:
+        return 0.0
+    projected = np.column_stack([centered @ basis_x, centered @ basis_y])
+    x = projected[:, 0]
+    y = projected[:, 1]
+    return float(0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
+def fill_small_holes(
+    mesh: o3d.geometry.TriangleMesh,
+    profile: ReconstructionProfile,
+) -> tuple[o3d.geometry.TriangleMesh, dict[str, Any]]:
+    if not profile.fill_small_holes_enabled:
+        return mesh, {"filled_hole_count": 0, "added_hole_faces": 0}
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.triangles, dtype=np.int64)
+    if len(vertices) < 3 or len(faces) < 1:
+        return mesh, {"filled_hole_count": 0, "added_hole_faces": 0}
+
+    total_area = float(np.sum(_triangle_areas(vertices, faces)))
+    new_vertices = vertices.tolist()
+    new_faces = faces.tolist()
+    filled_count = 0
+    added_faces = 0
+
+    for loop in _boundary_loops(faces):
+        if len(loop) > profile.small_hole_max_boundary_edges:
+            continue
+        loop_points = vertices[np.asarray(loop, dtype=np.int64)]
+        area = _loop_area(loop_points)
+        if area <= 1e-12 or area / max(total_area, 1e-12) > profile.small_hole_max_area_ratio:
+            continue
+        center_index = len(new_vertices)
+        new_vertices.append(loop_points.mean(axis=0).tolist())
+        for i, current in enumerate(loop):
+            nxt = loop[(i + 1) % len(loop)]
+            new_faces.append([int(current), int(nxt), center_index])
+            added_faces += 1
+        filled_count += 1
+
+    if filled_count == 0:
+        return mesh, {"filled_hole_count": 0, "added_hole_faces": 0}
+
+    processed = o3d.geometry.TriangleMesh()
+    processed.vertices = o3d.utility.Vector3dVector(np.asarray(new_vertices, dtype=np.float64))
+    processed.triangles = o3d.utility.Vector3iVector(np.asarray(new_faces, dtype=np.int32))
+    processed.remove_degenerate_triangles()
+    processed.remove_duplicated_triangles()
+    processed.remove_duplicated_vertices()
+    processed.remove_unreferenced_vertices()
+    processed.compute_vertex_normals()
+    return processed, {"filled_hole_count": filled_count, "added_hole_faces": added_faces}
+
+
+def postprocess_mesh_defects(
+    mesh: o3d.geometry.TriangleMesh,
+    source_pcd: o3d.geometry.PointCloud,
+    voxel_size: float,
+    scale: float,
+    profile: ReconstructionProfile,
+) -> tuple[o3d.geometry.TriangleMesh, dict[str, Any]]:
+    processed, flying_stats = remove_flying_sheets(mesh, source_pcd, voxel_size, scale, profile)
+    processed, hole_stats = fill_small_holes(processed, profile)
+    try:
+        processed.remove_degenerate_triangles()
+        processed.remove_duplicated_triangles()
+        processed.remove_duplicated_vertices()
+        processed.remove_unreferenced_vertices()
+    except (AttributeError, RuntimeError, ValueError):
+        pass
+    processed.compute_vertex_normals()
+    return processed, {
+        "removed_flying_sheet_faces": int(flying_stats["removed_flying_sheet_faces"]),
+        "filled_hole_count": int(hole_stats["filled_hole_count"]),
+        "added_hole_faces": int(hole_stats["added_hole_faces"]),
+        "area_loss_ratio": float(flying_stats["area_loss_ratio"]),
+        "rolled_back": bool(flying_stats["rolled_back"]),
+        "boundary_edges_after": count_boundary_edges(processed),
+    }
+
+
+class DisjointSet:
+    """Union-find with component size and Felzenszwalb-style internal difference."""
+
+    def __init__(self, count: int) -> None:
+        self.parent = np.arange(count, dtype=np.int32)
+        self.size = np.ones(count, dtype=np.int32)
+        self.internal = np.zeros(count, dtype=np.float64)
+
+    def find(self, item: int) -> int:
+        root = item
+        while int(self.parent[root]) != root:
+            root = int(self.parent[root])
+        while int(self.parent[item]) != item:
+            parent = int(self.parent[item])
+            self.parent[item] = root
+            item = parent
+        return root
+
+    def union(self, first: int, second: int, edge_weight: float) -> int:
+        first = self.find(first)
+        second = self.find(second)
+        if first == second:
+            return first
+        if int(self.size[first]) < int(self.size[second]):
+            first, second = second, first
+        self.parent[second] = first
+        self.size[first] += self.size[second]
+        self.internal[first] = max(
+            float(edge_weight),
+            float(self.internal[first]),
+            float(self.internal[second]),
+        )
+        return first
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    return value
+
+
+def smooth_face_normals(
+    normals: np.ndarray,
+    adjacency: np.ndarray,
+    iterations: int,
+    gate_angle_deg: float,
+) -> np.ndarray:
+    """Denoise face normals without averaging across likely geometric creases."""
+
+    smoothed = np.asarray(normals, dtype=np.float64).copy()
+    if iterations <= 0 or len(adjacency) == 0:
+        return smoothed
+    gate_cosine = float(np.cos(np.deg2rad(gate_angle_deg)))
+    for _ in range(iterations):
+        first = adjacency[:, 0]
+        second = adjacency[:, 1]
+        similarity = np.einsum("ij,ij->i", smoothed[first], smoothed[second])
+        accepted = similarity >= gate_cosine
+        accum = smoothed.copy()
+        weights = np.ones(len(smoothed), dtype=np.float64)
+        np.add.at(accum, first[accepted], smoothed[second[accepted]])
+        np.add.at(accum, second[accepted], smoothed[first[accepted]])
+        np.add.at(weights, first[accepted], 1.0)
+        np.add.at(weights, second[accepted], 1.0)
+        smoothed = accum / weights[:, None]
+        lengths = np.linalg.norm(smoothed, axis=1)
+        smoothed /= np.maximum(lengths[:, None], 1e-12)
+    return smoothed
+
+
+def classify_surface_region(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    face_normals: np.ndarray,
+    face_areas: np.ndarray,
+    adjacency: np.ndarray,
+    adjacency_angles_deg: np.ndarray,
+    region_faces: np.ndarray,
+    object_diagonal: float,
+    total_area: float,
+    seg_cfg: dict[str, float | int],
+) -> dict[str, Any]:
+    """Describe a connected mesh-face region using geometry only."""
+
+    region_vertex_ids = np.unique(faces[region_faces].reshape(-1))
+    points = vertices[region_vertex_ids]
+    centroid = points.mean(axis=0)
+    centered = points - centroid
+    covariance = centered.T @ centered / max(len(points), 1)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    del eigenvalues
+    plane_normal = eigenvectors[:, 0]
+    plane_distances = centered @ plane_normal
+    plane_rms = float(np.sqrt(np.mean(plane_distances**2)))
+    normalized_plane_rms = plane_rms / max(object_diagonal, 1e-12)
+
+    weighted_normal = np.sum(
+        face_normals[region_faces] * face_areas[region_faces, None],
+        axis=0,
+    )
+    weighted_normal_length = float(np.linalg.norm(weighted_normal))
+    if weighted_normal_length > 1e-12:
+        weighted_normal /= weighted_normal_length
+        cosines = np.clip(face_normals[region_faces] @ weighted_normal, -1.0, 1.0)
+        normal_spread_deg = float(np.percentile(np.rad2deg(np.arccos(cosines)), 90.0))
+    else:
+        normal_spread_deg = 180.0
+
+    in_region = np.zeros(len(faces), dtype=bool)
+    in_region[region_faces] = True
+    internal_edges = in_region[adjacency[:, 0]] & in_region[adjacency[:, 1]]
+    internal_angle_p90 = (
+        float(np.percentile(adjacency_angles_deg[internal_edges], 90.0))
+        if np.any(internal_edges)
+        else 0.0
+    )
+
+    if normalized_plane_rms <= float(seg_cfg["planar_residual_ratio"]):
+        surface_type = "planar"
+    elif internal_angle_p90 <= float(seg_cfg["curved_internal_angle_deg"]):
+        surface_type = "smooth_curved"
+    else:
+        surface_type = "freeform"
+
+    region_area = float(np.sum(face_areas[region_faces]))
+    return {
+        "surface_type": surface_type,
+        "area": region_area,
+        "area_ratio": region_area / max(total_area, 1e-12),
+        "centroid": centroid,
+        "plane_fit": {
+            "normal": plane_normal,
+            "offset": -float(np.dot(plane_normal, centroid)),
+            "rms": plane_rms,
+            "normalized_rms": normalized_plane_rms,
+        },
+        "normal_spread_p90_deg": normal_spread_deg,
+        "internal_edge_angle_p90_deg": internal_angle_p90,
+    }
+
+
+def remap_face_labels_by_area(face_labels: np.ndarray, face_areas: np.ndarray) -> np.ndarray:
+    unique_labels, inverse = np.unique(face_labels, return_inverse=True)
+    if len(unique_labels) == 0:
+        return np.zeros(len(face_labels), dtype=np.int32)
+    label_areas = np.bincount(inverse, weights=face_areas, minlength=len(unique_labels))
+    area_order = np.argsort(-label_areas, kind="stable")
+    remap = np.empty(len(area_order), dtype=np.int32)
+    remap[area_order] = np.arange(len(area_order), dtype=np.int32)
+    return remap[inverse].astype(np.int32)
+
+
+def limit_surface_region_count(
+    face_labels: np.ndarray,
+    adjacency: np.ndarray,
+    face_areas: np.ndarray,
+    face_centroids: np.ndarray,
+    max_regions: int,
+) -> np.ndarray:
+    """Merge the smallest patches until the layer list stays usable in the UI."""
+
+    labels = remap_face_labels_by_area(face_labels, face_areas)
+    max_regions = max(1, int(max_regions))
+    if len(np.unique(labels)) <= max_regions:
+        return labels
+
+    while len(np.unique(labels)) > max_regions:
+        unique_labels, inverse = np.unique(labels, return_inverse=True)
+        label_areas = np.bincount(inverse, weights=face_areas, minlength=len(unique_labels))
+        label_counts = np.bincount(inverse, minlength=len(unique_labels))
+        label_ids = unique_labels.astype(np.int32)
+        area_by_label = {int(label): float(label_areas[i]) for i, label in enumerate(label_ids)}
+        count_by_label = {int(label): int(label_counts[i]) for i, label in enumerate(label_ids)}
+
+        weighted_centroids = np.zeros((len(label_ids), 3), dtype=np.float64)
+        np.add.at(weighted_centroids, inverse, face_centroids * face_areas[:, None])
+        weighted_centroids /= np.maximum(label_areas[:, None], 1e-12)
+        centroid_by_label = {int(label): weighted_centroids[i] for i, label in enumerate(label_ids)}
+
+        boundary_scores: dict[int, dict[int, float]] = {}
+        for first_face, second_face in adjacency:
+            first_label = int(labels[int(first_face)])
+            second_label = int(labels[int(second_face)])
+            if first_label == second_label:
+                continue
+            shared_score = float(face_areas[int(first_face)] + face_areas[int(second_face)])
+            boundary_scores.setdefault(first_label, {})[second_label] = (
+                boundary_scores.setdefault(first_label, {}).get(second_label, 0.0) + shared_score
+            )
+            boundary_scores.setdefault(second_label, {})[first_label] = (
+                boundary_scores.setdefault(second_label, {}).get(first_label, 0.0) + shared_score
+            )
+
+        source_label = min(
+            (int(label) for label in label_ids),
+            key=lambda label: (area_by_label[label], count_by_label[label], label),
+        )
+        neighbors = boundary_scores.get(source_label, {})
+        if neighbors:
+            target_label = max(
+                neighbors,
+                key=lambda label: (neighbors[label], area_by_label.get(label, 0.0), -label),
+            )
+        else:
+            source_centroid = centroid_by_label[source_label]
+            target_label = min(
+                (int(label) for label in label_ids if int(label) != source_label),
+                key=lambda label: (
+                    float(np.linalg.norm(centroid_by_label[label] - source_centroid)),
+                    -area_by_label[label],
+                    label,
+                ),
+            )
+        labels[labels == source_label] = target_label
+        labels = remap_face_labels_by_area(labels, face_areas)
+
+    return labels
+
+
+def graph_geometry_segmentation(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    seg_cfg: dict[str, float | int] | None = None,
+) -> dict[str, Any]:
+    """Segment connected face patches with an adaptive normal-angle graph."""
+
+    cfg = dict(GEOMETRY_GRAPH_SURFACE_CONFIG)
+    if seg_cfg:
+        cfg.update(seg_cfg)
+    tm = trimesh.Trimesh(vertices=vertices, faces=faces, process=False, validate=False)
+    adjacency = np.asarray(tm.face_adjacency, dtype=np.int64)
+    if len(faces) == 0:
+        raise RuntimeError("The reconstructed mesh has no faces.")
+    if len(adjacency) == 0:
+        face_labels = np.zeros(len(faces), dtype=np.int32)
+        face_normals = np.asarray(tm.face_normals, dtype=np.float64)
+        face_areas = np.asarray(tm.area_faces, dtype=np.float64)
+        labels_metadata = [
+            {
+                "id": 0,
+                "name": "layer_000_freeform",
+                "surface_type": "freeform",
+                "face_count": int(len(faces)),
+                "area": float(np.sum(face_areas)),
+                "area_ratio": 1.0,
+                "centroid": vertices.mean(axis=0),
+                "plane_fit": {"normal": [0.0, 0.0, 1.0], "offset": 0.0, "rms": 0.0, "normalized_rms": 0.0},
+                "normal_spread_p90_deg": 0.0,
+                "internal_edge_angle_p90_deg": 0.0,
+            }
+        ]
+        return {
+            "profile": GEOMETRY_GRAPH_SURFACE_PROFILE,
+            "config": cfg,
+            "face_labels": face_labels,
+            "label_count": 1,
+            "labels_metadata": labels_metadata,
+            "details": {
+                "algorithm": "adaptive_face_adjacency_graph",
+                "adjacency_edge_count": 0,
+                "region_boundary_edge_count": 0,
+                "surface_type_counts": {"freeform": 1},
+            },
+        }
+
+    face_normals = np.asarray(tm.face_normals, dtype=np.float64)
+    face_areas = np.asarray(tm.area_faces, dtype=np.float64)
+    smoothed_normals = smooth_face_normals(
+        face_normals,
+        adjacency,
+        iterations=int(cfg["normal_smoothing_iterations"]),
+        gate_angle_deg=float(cfg["normal_smoothing_gate_deg"]),
+    )
+    cosines = np.clip(
+        np.einsum(
+            "ij,ij->i",
+            smoothed_normals[adjacency[:, 0]],
+            smoothed_normals[adjacency[:, 1]],
+        ),
+        -1.0,
+        1.0,
+    )
+    edge_angles = np.arccos(cosines)
+    edge_order = np.argsort(edge_angles, kind="stable")
+
+    graph_scale = float(np.deg2rad(cfg["graph_scale_deg"]))
+    hard_angle = float(np.deg2rad(cfg["max_edge_angle_deg"]))
+    components = DisjointSet(len(faces))
+
+    for edge_index in edge_order:
+        weight = float(edge_angles[edge_index])
+        if weight > hard_angle:
+            break
+        first_face, second_face = adjacency[edge_index]
+        first_root = components.find(int(first_face))
+        second_root = components.find(int(second_face))
+        if first_root == second_root:
+            continue
+        first_threshold = float(components.internal[first_root]) + graph_scale / float(components.size[first_root])
+        second_threshold = float(components.internal[second_root]) + graph_scale / float(components.size[second_root])
+        if weight <= min(first_threshold, second_threshold):
+            components.union(first_root, second_root, weight)
+
+    min_faces_absolute = int(cfg["min_region_faces"])
+    min_faces_fraction = int(np.ceil(len(faces) * float(cfg["min_region_face_ratio"])))
+    requested_min_region_faces = max(1, min_faces_absolute, min_faces_fraction)
+    min_region_cap = max(1, int(np.ceil(len(faces) * 0.08)))
+    min_region_faces = min(requested_min_region_faces, min_region_cap)
+    merge_angle = float(np.deg2rad(cfg["small_region_merge_angle_deg"]))
+
+    for edge_index in edge_order:
+        weight = float(edge_angles[edge_index])
+        if weight > merge_angle:
+            break
+        first_face, second_face = adjacency[edge_index]
+        first_root = components.find(int(first_face))
+        second_root = components.find(int(second_face))
+        if first_root == second_root:
+            continue
+        if int(components.size[first_root]) < min_region_faces or int(components.size[second_root]) < min_region_faces:
+            components.union(first_root, second_root, weight)
+
+    roots = np.fromiter(
+        (components.find(face_id) for face_id in range(len(faces))),
+        dtype=np.int32,
+        count=len(faces),
+    )
+    unique_roots, inverse = np.unique(roots, return_inverse=True)
+    component_areas = np.bincount(inverse, weights=face_areas, minlength=len(unique_roots))
+    area_order = np.argsort(-component_areas, kind="stable")
+    remap = np.empty(len(area_order), dtype=np.int32)
+    remap[area_order] = np.arange(len(area_order), dtype=np.int32)
+    face_labels = remap[inverse].astype(np.int32)
+    pre_cap_label_count = int(face_labels.max()) + 1
+    face_centroids = np.mean(vertices[faces], axis=1)
+    face_labels = limit_surface_region_count(
+        face_labels,
+        adjacency,
+        face_areas,
+        face_centroids,
+        max_regions=int(cfg["max_surface_layers"]),
+    )
+    label_count = int(face_labels.max()) + 1
+
+    actual_angles_deg = np.rad2deg(
+        np.arccos(
+            np.clip(
+                np.einsum(
+                    "ij,ij->i",
+                    face_normals[adjacency[:, 0]],
+                    face_normals[adjacency[:, 1]],
+                ),
+                -1.0,
+                1.0,
+            )
+        )
+    )
+    boundary_edges = face_labels[adjacency[:, 0]] != face_labels[adjacency[:, 1]]
+    object_diagonal = float(np.linalg.norm(np.ptp(vertices, axis=0)))
+    total_area = float(np.sum(face_areas))
+    labels_metadata: list[dict[str, Any]] = []
+    surface_types: list[str] = []
+    for label_id in range(label_count):
+        region_faces = np.flatnonzero(face_labels == label_id)
+        descriptor = classify_surface_region(
+            vertices,
+            faces,
+            face_normals,
+            face_areas,
+            adjacency,
+            actual_angles_deg,
+            region_faces,
+            object_diagonal,
+            total_area,
+            cfg,
+        )
+        surface_type = str(descriptor["surface_type"])
+        surface_types.append(surface_type)
+        labels_metadata.append(
+            {
+                "id": label_id,
+                "name": f"layer_{label_id:03d}_{surface_type}",
+                "surface_type": surface_type,
+                "face_count": int(len(region_faces)),
+                "area": descriptor["area"],
+                "area_ratio": descriptor["area_ratio"],
+                "centroid": descriptor["centroid"],
+                "plane_fit": descriptor["plane_fit"],
+                "normal_spread_p90_deg": descriptor["normal_spread_p90_deg"],
+                "internal_edge_angle_p90_deg": descriptor["internal_edge_angle_p90_deg"],
+            }
+        )
+
+    unique_types, type_counts = np.unique(surface_types, return_counts=True)
+    return {
+        "profile": GEOMETRY_GRAPH_SURFACE_PROFILE,
+        "config": cfg,
+        "face_labels": face_labels,
+        "label_count": label_count,
+        "labels_metadata": labels_metadata,
+        "details": {
+            "algorithm": "adaptive_face_adjacency_graph",
+            "edge_feature": "denoised adjacent-face normal angle",
+            "min_region_faces_effective": int(min_region_faces),
+            "pre_cap_label_count": pre_cap_label_count,
+            "max_surface_layers": int(cfg["max_surface_layers"]),
+            "adjacency_edge_count": int(len(adjacency)),
+            "region_boundary_edge_count": int(np.count_nonzero(boundary_edges)),
+            "surface_type_counts": {str(k): int(v) for k, v in zip(unique_types, type_counts)},
+        },
+    }
+
+
+def label_palette(count: int) -> np.ndarray:
+    palette = np.zeros((max(count, 1), 3), dtype=np.uint8)
+    golden_ratio = 0.6180339887498949
+    for i in range(max(count, 1)):
+        hue = (0.08 + i * golden_ratio) % 1.0
+        saturation = 0.62 + 0.18 * ((i % 3) / 2.0)
+        value = 0.78 + 0.18 * (i % 2)
+        rgb = np.asarray(colorsys_hsv_to_rgb(hue, saturation, value))
+        palette[i] = np.round(rgb * 255).astype(np.uint8)
+    return palette
+
+
+def colorsys_hsv_to_rgb(hue: float, saturation: float, value: float) -> tuple[float, float, float]:
+    c = value * saturation
+    x = c * (1 - abs((hue * 6) % 2 - 1))
+    m = value - c
+    if hue < 1 / 6:
+        rgb = (c, x, 0)
+    elif hue < 2 / 6:
+        rgb = (x, c, 0)
+    elif hue < 3 / 6:
+        rgb = (0, c, x)
+    elif hue < 4 / 6:
+        rgb = (0, x, c)
+    elif hue < 5 / 6:
+        rgb = (x, 0, c)
+    else:
+        rgb = (c, 0, x)
+    return (rgb[0] + m, rgb[1] + m, rgb[2] + m)
+
+
+def export_geometry_graph_surface_layers(
+    mesh: o3d.geometry.TriangleMesh,
+    output_dir: str,
+) -> dict[str, Any]:
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.triangles, dtype=np.int64)
+    if len(vertices) < 3 or len(faces) < 1:
+        raise RuntimeError("geometry_graph_surface requires a non-empty triangle mesh.")
+
+    if not mesh.has_vertex_normals():
+        mesh.compute_vertex_normals()
+    vertex_normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
+    segmentation = graph_geometry_segmentation(vertices, faces)
+    face_labels = np.asarray(segmentation["face_labels"], dtype=np.int32)
+    palette = label_palette(int(segmentation["label_count"]))
+    layers_dir = os.path.join(output_dir, "layers")
+    os.makedirs(layers_dir, exist_ok=True)
+
+    layer_paths: list[str] = []
+    layer_names: list[str] = []
+    for region in segmentation["labels_metadata"]:
+        label_id = int(region["id"])
+        region_name = str(region["name"])
+        selected_faces = faces[face_labels == label_id]
+        if len(selected_faces) == 0:
+            continue
+        used_vertices, inverse = np.unique(selected_faces.reshape(-1), return_inverse=True)
+        local_faces = inverse.reshape(-1, 3)
+        color = palette[label_id % len(palette)]
+        vertex_rgba = np.tile(np.array([color[0], color[1], color[2], 255], dtype=np.uint8), (len(used_vertices), 1))
+        region_mesh = trimesh.Trimesh(
+            vertices=vertices[used_vertices],
+            faces=local_faces,
+            vertex_normals=vertex_normals[used_vertices] if len(vertex_normals) == len(vertices) else None,
+            process=False,
+            validate=False,
+            metadata={
+                "name": region_name,
+                "region_id": label_id,
+                "surface_type": region["surface_type"],
+                "segmentation_profile": GEOMETRY_GRAPH_SURFACE_PROFILE,
+            },
+        )
+        region_mesh.visual.vertex_colors = vertex_rgba
+        scene = trimesh.Scene()
+        scene.add_geometry(region_mesh, node_name=region_name, geom_name=region_name)
+        layer_path = os.path.join(layers_dir, f"{region_name}.glb")
+        scene.export(layer_path, file_type="glb")
+        layer_paths.append(layer_path)
+        layer_names.append(region_name)
+
+    metadata = {
+        "schema_version": "1.0",
+        "segmentation_profile": GEOMETRY_GRAPH_SURFACE_PROFILE,
+        "label_count": int(segmentation["label_count"]),
+        "config": segmentation["config"],
+        "details": segmentation["details"],
+        "layers": segmentation["labels_metadata"],
+        "layer_glb_paths": layer_paths,
+        "layer_names": layer_names,
+    }
+    metadata_path = os.path.join(output_dir, "layers_meta.json")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(_json_ready(metadata), f, ensure_ascii=False, indent=2)
+
+    return {
+        "segmentationProfile": GEOMETRY_GRAPH_SURFACE_PROFILE,
+        "segmentationLabelCount": int(segmentation["label_count"]),
+        "segmentationMetadataPath": metadata_path,
+        "layerGlbPaths": layer_paths,
+        "layerNames": layer_names,
+        "faceLabels": face_labels,
+        "labelsMetadata": segmentation["labels_metadata"],
+    }
+
+
 def run_pipeline(
     input_path: str,
     output_dir: str,
@@ -665,6 +1531,7 @@ def run_pipeline(
         mesh.remove_unreferenced_vertices()
     except (AttributeError, RuntimeError, ValueError):
         pass
+    mesh, postprocess_stats = postprocess_mesh_defects(mesh, pcd_clean, voxel_size, scale, profile)
     if len(mesh.vertices) < 3 or len(mesh.triangles) < 1:
         print(
             json.dumps(
@@ -712,6 +1579,8 @@ def run_pipeline(
         except Exception as e:
             print(f"[gs_to_mesh] Vertex color transfer failed: {e}", file=sys.stderr)
 
+    segmentation_result = export_geometry_graph_surface_layers(mesh, output_dir)
+
     # Export based on format
     output_format = output_format.lower()
     if output_format == "glb":
@@ -750,6 +1619,17 @@ def run_pipeline(
         "reconstructionScores": profile_decision.scores,
         "densityThreshold": density_threshold,
         "removedByDensity": removed_by_density,
+        "postprocessRemovedSheetFaces": postprocess_stats["removed_flying_sheet_faces"],
+        "postprocessFilledHoleCount": postprocess_stats["filled_hole_count"],
+        "postprocessAddedHoleFaces": postprocess_stats["added_hole_faces"],
+        "postprocessAreaLossRatio": postprocess_stats["area_loss_ratio"],
+        "postprocessRolledBack": postprocess_stats["rolled_back"],
+        "postprocessBoundaryEdgesAfter": postprocess_stats["boundary_edges_after"],
+        "segmentationProfile": segmentation_result["segmentationProfile"],
+        "segmentationLabelCount": segmentation_result["segmentationLabelCount"],
+        "segmentationMetadataPath": segmentation_result["segmentationMetadataPath"],
+        "layerGlbPaths": segmentation_result["layerGlbPaths"],
+        "layerNames": segmentation_result["layerNames"],
     }
     print(json.dumps(result), flush=True)
 

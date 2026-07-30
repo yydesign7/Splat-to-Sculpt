@@ -16,6 +16,11 @@ export interface MeshTask {
     vertexCount: number;
     reconstructionProfile?: string;
     requestedReconstructionProfile?: string;
+    layerGlbUrls?: string[];
+    layerNames?: string[];
+    segmentationProfile?: 'geometry_graph_surface';
+    segmentationLabelCount?: number;
+    segmentationMetadataUrl?: string;
   };
   error?: string;
 }

@@ -75,7 +75,8 @@ export async function POST(request: NextRequest) {
 
     const sourcePath = resolveClientMediaUrlToFilesystem(fileUrl);
     const ext = path.extname(sourcePath).toLowerCase();
-    if (ext !== '.ply') {
+    const supportedModelExts = new Set(['.glb', '.gltf', '.obj']);
+    if (ext !== '.ply' && !supportedModelExts.has(ext)) {
       return NextResponse.json({ error: `Unsupported thumbnail source: ${ext || 'unknown'}` }, { status: 400 });
     }
 
@@ -84,7 +85,8 @@ export async function POST(request: NextRequest) {
     const outputPath = path.join(getSessionRoot(ephemeralSessionId), relPath);
     await mkdir(path.dirname(outputPath), { recursive: true });
 
-    const scriptPath = path.join(process.cwd(), 'scripts', 'render_ply_thumbnail.py');
+    const scriptName = ext === '.ply' ? 'render_ply_thumbnail.py' : 'render_model_thumbnail.py';
+    const scriptPath = path.join(process.cwd(), 'scripts', scriptName);
     const { stdout, stderr } = await runThumbnailScript([
       scriptPath,
       '--input',

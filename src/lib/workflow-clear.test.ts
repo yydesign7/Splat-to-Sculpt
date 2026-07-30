@@ -29,6 +29,8 @@ test('clear regenerates node ids and preserves edge topology', () => {
       target: 'frames-1',
       sourceHandle: 'output',
       targetHandle: 'input',
+      type: 'workflow',
+      selected: true,
     },
   ];
 
@@ -58,6 +60,7 @@ test('clear regenerates node ids and preserves edge topology', () => {
     target: 'frames-1-cleared',
     sourceHandle: 'output',
     targetHandle: 'input',
+    type: 'workflow',
     selected: false,
   });
 

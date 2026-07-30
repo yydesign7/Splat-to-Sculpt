@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdir, access } from 'fs/promises';
+import { mkdir, access, copyFile } from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import {
+  buildCleanupPassthroughResult,
+  shouldPassthroughOnBlenderFailure,
+  type BlenderScriptResult,
+} from '@/lib/blender-cleanup-fallback';
 import { checkBlenderCommand, resolveBlenderCommand } from '@/lib/check-python-deps';
 import {
   buildEphemeralFileUrl,
@@ -13,6 +18,40 @@ import {
 } from '@/lib/ephemeral-storage';
 
 const execFileAsync = promisify(execFile);
+
+function parseBlenderJson(stdout: string): Record<string, unknown> | null {
+  const lines = stdout.trim().split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) continue;
+    try {
+      return JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function getExecOutput(error: unknown, key: 'stdout' | 'stderr'): string {
+  if (!error || typeof error !== 'object') return '';
+  const value = (error as { stdout?: string | Buffer; stderr?: string | Buffer })[key];
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  return '';
+}
+
+function getExecCode(error: unknown): number | string | null {
+  if (!error || typeof error !== 'object') return null;
+  const value = (error as { code?: number | string | null }).code;
+  return value ?? null;
+}
+
+function getExecSignal(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null;
+  const value = (error as { signal?: string | null }).signal;
+  return value ?? null;
+}
 
 /**
  * POST /api/blender-organize
@@ -75,33 +114,48 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Blender executable not found' }, { status: 503 });
     }
 
-    const { stdout, stderr } = await execFileAsync(blenderCommand, [
-      '--background',
-      '--python', blenderScript,
-      '--',
-      '--input', modelServerPath,
-      '--output-dir', outputDir,
-    ], {
-      timeout: 300000, // 5 min
-      env: { ...process.env },
-    });
-
-    // Parse JSON from Blender output (last line starting with '{')
-    const lines = stdout.trim().split('\n');
+    let stdout = '';
+    let stderr = '';
     let result: Record<string, unknown> | null = null;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (line.startsWith('{')) {
-        try {
-          result = JSON.parse(line);
-          break;
-        } catch {
-          continue;
-        }
+    try {
+      const output = await execFileAsync(blenderCommand, [
+        '--background',
+        '--python', blenderScript,
+        '--',
+        '--input', modelServerPath,
+        '--output-dir', outputDir,
+      ], {
+        timeout: 300000, // 5 min
+        env: { ...process.env },
+      });
+      stdout = output.stdout;
+      stderr = output.stderr;
+      result = parseBlenderJson(stdout);
+    } catch (execError: unknown) {
+      stdout = getExecOutput(execError, 'stdout');
+      stderr = getExecOutput(execError, 'stderr');
+      result = parseBlenderJson(stdout);
+      if (
+        shouldPassthroughOnBlenderFailure({
+          message: execError instanceof Error ? execError.message : undefined,
+          code: getExecCode(execError),
+          signal: getExecSignal(execError),
+          stdout,
+          stderr,
+          parsedScriptResult: result as BlenderScriptResult | null,
+        })
+      ) {
+        const passthroughPath = path.join(outputDir, path.basename(modelServerPath));
+        await copyFile(modelServerPath, passthroughPath);
+        result = buildCleanupPassthroughResult(passthroughPath);
+        console.warn('[blender-organize] Blender crashed before cleanup; using original model passthrough.');
+      } else if (!result) {
+        throw execError;
       }
     }
 
     if (!result) {
+      const lines = stdout.trim().split('\n');
       console.error('[blender-organize] Failed to parse output. Last lines:', lines.slice(-5));
       console.error('[blender-organize] stderr:', stderr?.slice(-500));
       return NextResponse.json({ error: 'Failed to parse Blender output' }, { status: 500 });
@@ -127,6 +181,7 @@ export async function POST(request: NextRequest) {
       vertexCountAfter: result.vertex_count_after,
       faceCountBefore: result.face_count_before,
       faceCountAfter: result.face_count_after,
+      cleanupPassthrough: result.cleanup_passthrough === true,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Blender model cleanup failed';

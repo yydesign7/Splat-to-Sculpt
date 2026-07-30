@@ -113,6 +113,14 @@ export const NODE_TYPE_CONFIGS: NodeTypeConfig[] = [
     description: 'splat/PLY/OBJ/GLB -> GLB/OBJ/PLY',
   },
   {
+    type: 'comfyVideo',
+    label: 'ComfyUI Video Gen',
+    category: 'output',
+    color: NODE_CATEGORY_THEMES.output.accent,
+    icon: '▶',
+    description: 'model -> ComfyUI video',
+  },
+  {
     type: 'videoPreview',
     label: 'Video Preview',
     category: 'output',

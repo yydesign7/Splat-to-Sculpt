@@ -14,6 +14,7 @@ from gs_to_mesh import (  # noqa: E402
     choose_reconstruction_profile,
     get_reconstruction_profile,
     get_reconstruction_profile_names,
+    score_reconstruction_profiles,
 )
 
 
@@ -88,9 +89,49 @@ def test_auto_profile_for_noisy_multi_cluster_scan() -> None:
     assert_equal(decision.profile.name, "noisy_scan", "many clusters plus noise should select noisy_scan")
 
 
+def test_chair_like_open_furniture_scores_default_general() -> None:
+    scores = score_reconstruction_profiles(
+        {
+            "cluster_count": 1,
+            "noise_ratio": 0.0,
+            "plane_ratio": 0.14,
+            "flatness": 0.95,
+            "elongation": 1.45,
+            "thickness_ratio": 0.65,
+            "radial_cv": 0.51,
+            "density_cv": 0.42,
+            "point_count": 300000,
+        },
+        input_representation="pointcloud",
+    )
+    selected = max(scores, key=lambda name: scores[name])
+    assert_equal(selected, "default_general", "open chair-like furniture should avoid closed_solid")
+
+
+def test_elongated_screw_like_scores_closed_solid() -> None:
+    scores = score_reconstruction_profiles(
+        {
+            "cluster_count": 1,
+            "noise_ratio": 0.0,
+            "plane_ratio": 0.07,
+            "flatness": 0.99,
+            "elongation": 1.8,
+            "thickness_ratio": 0.55,
+            "radial_cv": 0.41,
+            "density_cv": 0.44,
+            "point_count": 230000,
+        },
+        input_representation="pointcloud",
+    )
+    selected = max(scores, key=lambda name: scores[name])
+    assert_equal(selected, "closed_solid", "elongated screw-like solids should keep closed_solid")
+
+
 if __name__ == "__main__":
     test_profile_registry()
     test_auto_profile_for_closed_cylinder()
     test_auto_profile_for_flat_panel()
     test_auto_profile_for_noisy_multi_cluster_scan()
+    test_chair_like_open_furniture_scores_default_general()
+    test_elongated_screw_like_scores_closed_solid()
     print("PASS: gs_to_mesh reconstruction profiles")

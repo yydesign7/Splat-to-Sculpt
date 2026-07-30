@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execFile, spawn } from 'child_process';
-import { mkdir, readdir, readFile, rm, stat } from 'fs/promises';
+import { mkdir, rm } from 'fs/promises';
 import { promisify } from 'util';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -13,6 +13,7 @@ import {
   resolveClientMediaUrlToFilesystem,
 } from '@/lib/ephemeral-storage';
 import { killProcessTree } from '@/lib/process-tree';
+import { shouldRunGaussianAutoLayers } from '@/lib/gaussian-segmentation-policy';
 
 const execFileAsync = promisify(execFile);
 
@@ -213,36 +214,6 @@ async function checkInitializerPythonRuntime(command: string): Promise<string | 
   }
 }
 
-async function resolveSegmentationPythonCommand(preferredCommand: string): Promise<string | null> {
-  const candidates = [
-    process.env.POINTCLOUD_PYTHON_BIN,
-    process.env.PYTHON_BIN,
-    preferredCommand,
-    process.env.HOME ? path.join(process.env.HOME, 'miniconda3', 'envs', 'studio3dgs', 'bin', 'python3') : null,
-    'python3',
-  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
-
-  const seen = new Set<string>();
-  for (const candidate of candidates) {
-    if (seen.has(candidate)) continue;
-    seen.add(candidate);
-    try {
-      await execFileAsync(candidate, ['-c', 'import open3d'], {
-        timeout: 30_000,
-        env: {
-          ...process.env,
-          MPLCONFIGDIR: process.env.MPLCONFIGDIR || '/private/tmp/studio3dgs-matplotlib',
-          XDG_CACHE_HOME: process.env.XDG_CACHE_HOME || '/private/tmp/studio3dgs-cache',
-        },
-      });
-      return candidate;
-    } catch {
-      // Try the next Python candidate.
-    }
-  }
-  return null;
-}
-
 async function checkTrainerCommand(command: string, kind: 'train' | 'export'): Promise<string | null> {
   const args = kind === 'train' ? ['splatfacto', '--help'] : ['gaussian-splat', '--help'];
   try {
@@ -403,10 +374,11 @@ export async function POST(request: NextRequest) {
   const trainingMode: GaussianTrainingMode = isPlyOnlyInput
     ? 'auto'
     : requestedTrainingMode === 'train' && trainingSupport.trueTrainingAvailable ? 'train' : 'auto';
-  const enableSegmentation =
-    trainingMode === 'auto' &&
-    body.enableSegmentation !== false &&
-    (hasPly || (hasFrames && backend.kind !== 'cuda'));
+  const enableSegmentation = shouldRunGaussianAutoLayers({
+    requested: body.enableSegmentation,
+    hasPly,
+    hasFrames,
+  });
   const targetPlyType = isPlyOnlyInput ? '3DGS-field initializer splat PLY' : getTargetPlyType(backend, trainingMode);
   const computeBackend = isPlyOnlyInput && requestedTrainingMode === 'train'
     ? `${backend.label}; uploaded PLY uses initializer`
@@ -625,102 +597,6 @@ async function runGaussianInitializer(params: {
   });
 }
 
-async function segmentUploadedPointCloud(
-  taskId: string,
-  input: GaussianPipelineInput,
-  sourcePlyUrl: string,
-  pythonCommand: string,
-): Promise<{ sourcePlyUrl: string; layerFiles: string[]; layerNames: string[] }> {
-  if (!input.enableSegmentation) {
-    return { sourcePlyUrl, layerFiles: [], layerNames: [] };
-  }
-
-  const jobId = randomUUID();
-  const relBase = `gaussian-splats/${jobId}/uploaded-ply-segments`;
-  const segmentDir = path.join(getSessionRoot(input.ephemeralSessionId), relBase);
-  const segmentedPlyPath = path.join(segmentDir, 'output.ply');
-  const layersDir = path.join(segmentDir, 'layers');
-  const segmentScriptPath = path.join(process.cwd(), 'scripts', 'pointcloud_segment.py');
-
-  await setTask(taskId, {
-    progress: 'Segmenting uploaded point cloud...',
-    progressStep: 3,
-    currentTrainingIteration: undefined,
-    maxTrainingIterations: undefined,
-  });
-
-  try {
-    await mkdir(segmentDir, { recursive: true });
-    const segmentationPythonCommand = await resolveSegmentationPythonCommand(pythonCommand);
-    if (!segmentationPythonCommand) {
-      console.error('[uploaded-ply-segmentation] No Python runtime with open3d was found.');
-      return { sourcePlyUrl, layerFiles: [], layerNames: [] };
-    }
-    const sourcePlyPath = resolveClientMediaUrlToFilesystem(sourcePlyUrl);
-    const { stdout, stderr } = await runGaussianScript(
-      segmentationPythonCommand,
-      [
-        segmentScriptPath,
-        '--input',
-        sourcePlyPath,
-        '--output_ply',
-        segmentedPlyPath,
-        '--layers_dir',
-        layersDir,
-        '--mode',
-        'segment_all',
-      ],
-      {
-        timeout: 300_000,
-        onStart: (pid) => {
-          setTask(taskId, { trainingPid: pid }).catch(() => {});
-        },
-      },
-    );
-
-    await setTask(taskId, { trainingPid: undefined });
-    if (stdout.trim()) console.log('[uploaded-ply-segmentation]', stdout.slice(-4000));
-    if (stderr.trim()) console.error('[uploaded-ply-segmentation stderr]', stderr.slice(-4000));
-
-    const outputStat = await stat(segmentedPlyPath);
-    if (outputStat.size <= 100) {
-      return { sourcePlyUrl, layerFiles: [], layerNames: [] };
-    }
-
-    let layerFiles: string[] = [];
-    let layerNames: string[] = [];
-    try {
-      const layerEntries = await readdir(layersDir);
-      const plyFiles = layerEntries.filter((entry) => entry.toLowerCase().endsWith('.ply')).sort();
-      layerFiles = plyFiles.map((fileName) =>
-        buildEphemeralFileUrl(input.ephemeralSessionId, `${relBase}/layers/${fileName}`),
-      );
-
-      if (layerEntries.includes('layers_meta.json')) {
-        const metaRaw = await readFile(path.join(layersDir, 'layers_meta.json'), 'utf-8');
-        const meta = JSON.parse(metaRaw) as { layers?: Array<{ name?: string }> };
-        if (Array.isArray(meta.layers)) {
-          layerNames = meta.layers.map((layer, index) => layer.name || `layer_${index}`);
-        }
-      }
-    } catch {
-      layerFiles = [];
-      layerNames = [];
-    }
-
-    return {
-      sourcePlyUrl: buildEphemeralFileUrl(input.ephemeralSessionId, `${relBase}/output.ply`),
-      layerFiles,
-      layerNames,
-    };
-  } catch (error: unknown) {
-    await setTask(taskId, { trainingPid: undefined });
-    const message = error instanceof Error ? error.message : 'Uploaded point cloud segmentation failed';
-    console.error('[uploaded-ply-segmentation] Error (non-fatal):', message);
-    return { sourcePlyUrl, layerFiles: [], layerNames: [] };
-  }
-}
-
 async function runGaussianPipeline(
   taskId: string,
   input: GaussianPipelineInput,
@@ -740,16 +616,11 @@ async function runGaussianPipeline(
     });
 
     let sourcePlyUrl = input.plyUrl || '';
-    let layerFiles: string[] = [];
-    let layerNames: string[] = [];
+    const layerFiles: string[] = [];
+    const layerNames: string[] = [];
 
     if (sourcePlyUrl && (!input.framePaths || input.framePaths.length === 0)) {
       await ensureNotCancelled(taskId);
-      const segmentedInput = await segmentUploadedPointCloud(taskId, input, sourcePlyUrl, trainer.pythonCommand);
-      await ensureNotCancelled(taskId);
-      sourcePlyUrl = segmentedInput.sourcePlyUrl;
-      layerFiles = segmentedInput.layerFiles;
-      layerNames = segmentedInput.layerNames;
       await runGaussianInitializer({
         taskId,
         input,
@@ -770,8 +641,6 @@ async function runGaussianPipeline(
       const pointCloud = await runPointCloudStage(taskId, origin, input);
       await ensureNotCancelled(taskId);
       sourcePlyUrl = pointCloud.plyUrl;
-      layerFiles = pointCloud.layerFiles || [];
-      layerNames = pointCloud.layerNames || [];
       colmapWorkspacePath = pointCloud.colmapWorkspacePath;
 
       if (!pointCloud.colmapImagesDir || !pointCloud.colmapSparseDir) {

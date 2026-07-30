@@ -5,8 +5,14 @@ import { Handle, Position, useReactFlow, type NodeProps, type Node } from '@xyfl
 import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Layers, Video, Film, Palette, Box, Check, RotateCcw, StickyNote, Download, Sparkles, Orbit, Brush, Eraser } from 'lucide-react';
 import { getNodeConfig, getNodeVisualTheme, NODE_WIDTH, VIDEO_PREVIEW_NODE_WIDTH } from '@/lib/node-config';
 import { mergeLayerGlbsInBrowser, isGltfLikeUrl, type LayerGlbEntry } from '@/lib/browser-merge-glb';
+import { GAUSSIAN_TASK_MAX_POLL_ATTEMPTS, GAUSSIAN_TASK_POLL_INTERVAL_MS } from '@/lib/gaussian-task-polling';
 import { inferModelTypeFromUrl as inferModelType } from '@/lib/infer-model-type-from-url';
+import { selectMeshGenerationAssetCandidate } from '@/lib/mesh-asset-publish-policy';
+import { selectModelCleanupMode } from '@/lib/model-cleanup-mode';
+import { resolveUploadedVideoServerPath, type RecordedAssetResponse } from '@/lib/uploaded-video-asset';
 import { useWorkflow } from '@/lib/workflow-context';
+import { DEFAULT_COMFY_VIDEO_PRESET } from '@/lib/comfyui-video-preset';
+import type { ComfyVideoPreset, ComfyVideoRunSettings } from '@/lib/comfyui-workflow';
 import dynamic from 'next/dynamic';
 import { DynamicPreviewImage } from './DynamicPreviewImage';
 
@@ -54,15 +60,17 @@ async function recordAsset(params: {
   fileType: string;
   thumbnailUrl?: string | null;
   sourceNode: string;
-}) {
+}): Promise<RecordedAssetResponse | null> {
   try {
-    await fetch('/api/asset-library', {
+    const response = await fetch('/api/asset-library', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
+    return await response.json() as RecordedAssetResponse;
   } catch {
     // Silently fail — asset recording is non-critical
+    return null;
   }
 }
 
@@ -116,27 +124,6 @@ function drawCroppedImageToCanvas(
   return canvas;
 }
 
-/** Poll /api/mesh-status until a generate-mesh task finishes */
-async function waitForMeshTask(
-  taskId: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<{ meshUrl: string; meshFormat: string; faceCount: number }> {
-  for (let attempt = 0; attempt < 90; attempt++) {
-    const r = await fetchImpl(`/api/mesh-status?taskId=${encodeURIComponent(taskId)}`);
-    const task = await r.json();
-    if (task.status === 'done' && task.result) {
-      return {
-        meshUrl: task.result.meshUrl,
-        meshFormat: task.result.meshFormat,
-        faceCount: task.result.faceCount ?? 0,
-      };
-    }
-    if (task.status === 'error') throw new Error(task.error || 'Mesh generation failed');
-    await new Promise((res) => setTimeout(res, 2000));
-  }
-  throw new Error('Mesh task timeout');
-}
-
 /** Poll /api/gaussian-status until a generate-gaussian-splat task finishes */
 async function waitForGaussianTask(
   taskId: string,
@@ -154,7 +141,7 @@ async function waitForGaussianTask(
     maxTrainingIterations?: number;
   }) => void,
 ): Promise<{ splatUrl: string; sourcePlyUrl: string; gaussianCount: number; format: '3dgs-ply'; layerFiles?: string[]; layerNames?: string[]; deviceType?: GaussianDeviceType; computeBackend?: string; trainingMode?: GaussianTrainingMode; targetPlyType?: string }> {
-  for (let attempt = 0; attempt < 240; attempt++) {
+  for (let attempt = 0; attempt < GAUSSIAN_TASK_MAX_POLL_ATTEMPTS; attempt++) {
     const r = await fetchImpl(`/api/gaussian-status?taskId=${encodeURIComponent(taskId)}`);
     const task = await r.json();
     if (task.status === 'processing') {
@@ -185,7 +172,7 @@ async function waitForGaussianTask(
     }
     if (task.status === 'cancelled') throw new Error('Gaussian splat generation stopped');
     if (task.status === 'error') throw new Error(task.error || 'Gaussian splat generation failed');
-    await new Promise((res) => setTimeout(res, 2000));
+    await new Promise((res) => setTimeout(res, GAUSSIAN_TASK_POLL_INTERVAL_MS));
   }
   throw new Error('Gaussian splat task timeout');
 }
@@ -333,7 +320,6 @@ type GaussianSplatNodeData = Node<{
   targetPlyType: string | null;
   trueTrainingAvailable?: boolean | null;
   trueTrainingUnavailableReason?: string | null;
-  enableFastSegmentation?: boolean;
   layerFiles: string[];
   layerNames: string[];
 }>;
@@ -370,6 +356,44 @@ type VideoPreviewNodeData = Node<{
   errorMessage: string | null;
   lightParams: LightParams | null;
 }>;
+
+type ComfyStatus = 'idle' | 'processing' | 'done' | 'error';
+
+type ComfyVideoData = Record<string, unknown> & {
+  label: string;
+  modelUrl: string | null;
+  videoUrl: string | null;
+  videoName: string | null;
+  comfyStatus: ComfyStatus;
+  progressText: string | null;
+  errorMessage: string | null;
+  promptId: string | null;
+  comfyInput3dDir: string | null;
+  detectedInputDir: string | null;
+  detectedOutputDir: string | null;
+  detectedInput3dDir: string | null;
+  comfyOnline: boolean | null;
+  comfyVersion: string | null;
+} & ComfyVideoPreset;
+
+type ComfyVideoSettingsUpdates = Partial<ComfyVideoPreset> & {
+  comfyInput3dDir?: string | null;
+};
+
+type ComfyVideoNodeData = Node<ComfyVideoData>;
+
+type SeedancePackStatusResult = {
+  success?: boolean;
+  ready?: boolean;
+  installed?: boolean;
+  loaded?: boolean;
+  customNodesDir?: string | null;
+  workflowsDir?: string | null;
+  missingCustomNodeFolders?: string[];
+  missingWorkflowFiles?: string[];
+  missingNodeTypes?: string[];
+  error?: string;
+};
 
 /** Principled BSDF material parameters matching Blender's node */
 export interface MaterialParams {
@@ -524,6 +548,7 @@ const HEADER_ICONS: Record<string, React.ReactNode> = {
   gaussianSplat: <Orbit size={14} />,
   material: <Palette size={14} />,
   modelOrganize: <Eraser size={14} />,
+  comfyVideo: <Sparkles size={14} />,
   videoPreview: <MonitorPlay size={14} />,
   modelSurface: <Brush size={14} />,
   modelGeneration: <Box size={14} />,
@@ -1038,14 +1063,16 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
           setUploadStatus('done');
 
           // Record uploaded video to asset library
-          recordAsset({
-            name: data.videoName || 'uploaded-video',
+          const uploadedVideoName = typeof result.videoName === 'string' ? result.videoName : file.name;
+          const assetResponse = await recordAsset({
+            name: uploadedVideoName || 'uploaded-video',
             assetType: 'video',
             fileUrl: videoServerPath,
             fileType: 'mp4',
             thumbnailUrl,
             sourceNode: 'videoUpload',
           });
+          const publishedVideoServerPath = resolveUploadedVideoServerPath(videoServerPath, assetResponse);
 
           // Update this node and push videoServerPath (+ frame count) to downstream FrameExtractionNode
           setNodes((nds) => {
@@ -1057,7 +1084,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
                       ...n.data,
                       uploadStatus: 'done',
                       uploadError: null,
-                      videoServerPath,
+                      videoServerPath: publishedVideoServerPath,
                     },
                   }
                 : n
@@ -1081,7 +1108,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
                       ...n,
                       data: {
                         ...n.data,
-                        videoServerPath,
+                        videoServerPath: publishedVideoServerPath,
                         targetFrameCount: tfc,
                       },
                     }
@@ -1104,7 +1131,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
           );
         });
     },
-    [id, data.videoName, setNodes, getEdges, apiFetch]
+    [id, setNodes, getEdges, apiFetch]
   );
 
   const handleClearVideo = useCallback(() => {
@@ -1333,6 +1360,26 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
     setNodes((nds) => nds.filter((n) => n.id !== id));
   }, [id, setNodes]);
 
+  const handleOpenOutputFolder = useCallback(() => {
+    if (!data.outputFolder) return;
+    setErrorMessage(null);
+    apiFetch('/api/open-ephemeral-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderType: 'frames', folderId: data.outputFolder }),
+    })
+      .then(async (res) => {
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok || !result.success) {
+          throw new Error(typeof result.error === 'string' ? result.error : 'Failed to open frames folder');
+        }
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'Failed to open frames folder';
+        setErrorMessage(message);
+      });
+  }, [apiFetch, data.outputFolder]);
+
   return (
     <div
       style={getNodeFrameStyle('frameExtraction', status)}
@@ -1345,11 +1392,18 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
       ]} />
       <div className="p-3 space-y-2">
         {data.outputFolder && (
-          <div className="flex items-center justify-end">
-            <span className="flex items-center gap-1 text-[10px] text-zinc-400">
-              <FolderOpen size={10} />
-              {data.outputFolder}
-            </span>
+          <div className="flex items-center justify-center">
+            <button
+              type="button"
+              onClick={handleOpenOutputFolder}
+              title={`frames/${data.outputFolder}`}
+              className="nodrag nopan flex w-full min-w-0 max-w-full items-center justify-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200"
+            >
+              <FolderOpen size={10} className="shrink-0" />
+              <span className="min-w-0 truncate text-center">
+                frames/{data.outputFolder}
+              </span>
+            </button>
           </div>
         )}
         <PreviewBox className="h-[140px]" placeholder="Frame preview area">
@@ -1491,9 +1545,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
   const [trueTrainingUnavailableReason, setTrueTrainingUnavailableReason] = useState<string | null>(
     data.trueTrainingUnavailableReason ?? null
   );
-  const [enableFastSegmentation, setEnableFastSegmentation] = useState(
-    typeof data.enableFastSegmentation === 'boolean' ? data.enableFastSegmentation : true
-  );
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [plyUploading, setPlyUploading] = useState(false);
   const deviceDetectionStartedRef = useRef(false);
@@ -1530,13 +1581,8 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     if (data.trueTrainingUnavailableReason !== trueTrainingUnavailableReason) {
       setTrueTrainingUnavailableReason(data.trueTrainingUnavailableReason ?? null);
     }
-    const incomingEnableFastSegmentation =
-      typeof data.enableFastSegmentation === 'boolean' ? data.enableFastSegmentation : true;
-    if (incomingEnableFastSegmentation !== enableFastSegmentation) {
-      setEnableFastSegmentation(incomingEnableFastSegmentation);
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.framePaths, data.sourcePlyUrl, data.splatUrl, data.gaussianCount, data.status, data.progressText, data.progressStep, data.errorMessage, data.trainingIterations, data.currentTrainingIteration, data.maxTrainingIterations, data.activeTaskId, data.deviceType, data.computeBackend, data.trainingMode, data.targetPlyType, data.trueTrainingAvailable, data.trueTrainingUnavailableReason, data.enableFastSegmentation]);
+  }, [data.framePaths, data.sourcePlyUrl, data.splatUrl, data.gaussianCount, data.status, data.progressText, data.progressStep, data.errorMessage, data.trainingIterations, data.currentTrainingIteration, data.maxTrainingIterations, data.activeTaskId, data.deviceType, data.computeBackend, data.trainingMode, data.targetPlyType, data.trueTrainingAvailable, data.trueTrainingUnavailableReason]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -1557,18 +1603,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
       nds.map((n) =>
         n.id === id
           ? { ...n, data: { ...n.data, trainingMode: value, targetPlyType: null } }
-          : n
-      )
-    );
-  }, [id, setNodes, status]);
-
-  const updateEnableFastSegmentation = useCallback((value: boolean) => {
-    if (status === 'processing') return;
-    setEnableFastSegmentation(value);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, enableFastSegmentation: value } }
           : n
       )
     );
@@ -1830,10 +1864,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     if (status === 'processing' || activeRunIdRef.current) return;
     if ((!hasFrames && !hasPly) || !ephemeralSessionId) return;
     const requestTrainingMode: GaussianTrainingMode = hasFrames ? trainingMode : 'auto';
-    const requestEnableSegmentation =
-      requestTrainingMode === 'auto' &&
-      enableFastSegmentation &&
-      (hasPly || (hasFrames && deviceType !== 'cuda'));
 
     setStatus('processing');
     setProgressText(hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...');
@@ -1857,7 +1887,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                 progressStep: 0,
                 errorMessage: null,
                 trainingMode: requestTrainingMode,
-                enableFastSegmentation,
                 currentTrainingIteration: null,
                 maxTrainingIterations: trainingIterations,
                 activeTaskId: null,
@@ -1877,7 +1906,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
             plyUrl: hasFrames ? undefined : sourcePlyUrl,
             trainingIterations,
             trainingMode: requestTrainingMode,
-            enableSegmentation: requestEnableSegmentation,
             ephemeralSessionId,
           }),
         });
@@ -2094,7 +2122,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
         );
       }
     })();
-  }, [apiFetch, deviceType, enableFastSegmentation, ephemeralSessionId, framePaths, id, setNodes, sourcePlyUrl, status, targetPlyType, trainingIterations, trainingMode]);
+  }, [apiFetch, deviceType, ephemeralSessionId, framePaths, id, setNodes, sourcePlyUrl, status, targetPlyType, trainingIterations, trainingMode]);
 
   useEffect(() => {
     if (!workflowRunning) return;
@@ -2164,8 +2192,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
   const trueTrainingReason = hasPlyOnlyInput
     ? 'True training requires extracted frames and COLMAP camera poses.'
     : trueTrainingUnavailableReason || 'True training requires a CUDA-compatible gsplat runtime.';
-  const canToggleFastSegmentation = status !== 'processing';
-  const showFastSegmentationControl = effectiveTrainingMode === 'auto' && (deviceType !== 'cuda' || hasPlyOnlyInput);
 
   return (
     <div
@@ -2357,37 +2383,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
             <p className="text-[9px] leading-snug text-zinc-500">
               True training unavailable: {trueTrainingReason}
             </p>
-          )}
-          {showFastSegmentationControl && (
-            <div className="flex items-center justify-between gap-2 rounded border border-zinc-700/70 bg-zinc-900/45 px-2 py-1.5">
-              <div className="min-w-0">
-                <span className="block text-[10px] text-zinc-300">Auto layers</span>
-                <span className="block text-[9px] leading-snug text-zinc-500">
-                  Fast initializer point cloud
-                </span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={enableFastSegmentation}
-                disabled={!canToggleFastSegmentation}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  updateEnableFastSegmentation(!enableFastSegmentation);
-                }}
-                className={`nodrag nopan relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
-                  enableFastSegmentation
-                    ? 'border-[#6f5aa8] bg-[#6f5aa8]'
-                    : 'border-zinc-600 bg-zinc-800'
-                } ${canToggleFastSegmentation ? 'cursor-pointer' : 'cursor-not-allowed opacity-45'}`}
-              >
-                <span
-                  className={`absolute left-0.5 top-1/2 h-4 w-4 -translate-y-1/2 rounded-full bg-white transition-transform ${
-                    enableFastSegmentation ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
           )}
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-zinc-300">Training steps</span>
@@ -2694,8 +2689,9 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
   // Call Blender organize API (per-layer when layerGlbUrls is set, else single)
   const handleOrganize = useCallback(() => {
     const layerGlbIn = (data.layerGlbUrls && data.layerGlbUrls.length > 0) ? data.layerGlbUrls : null;
+    const cleanupMode = selectModelCleanupMode({ modelUrl, layerGlbUrls: layerGlbIn });
 
-    if (layerGlbIn) {
+    if (cleanupMode === 'layers' && layerGlbIn) {
       (async () => {
         for (const u of layerGlbIn) {
           if (u.startsWith('blob:')) {
@@ -2781,7 +2777,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
       return;
     }
 
-    if (!modelUrl || modelUrl.startsWith('blob:')) {
+    if (cleanupMode === 'none' || !modelUrl || modelUrl.startsWith('blob:')) {
       setErrorMessage('File is uploading, please wait...');
       return;
     }
@@ -2791,7 +2787,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
     setNodes((nds) =>
       nds.map((n) =>
         n.id === id
-          ? { ...n, data: { ...n.data, organizeStatus: 'organizing' as const, errorMessage: null, layerGlbUrls: [] } }
+          ? { ...n, data: { ...n.data, organizeStatus: 'organizing' as const, errorMessage: null } }
           : n
       )
     );
@@ -2833,7 +2829,9 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
                     organizeStatus: 'done' as const,
                     outputUrl: organizedUrl,
                     outputType: organizedType,
-                    layerGlbUrls: [] as string[],
+                    layerFiles: data.layerFiles || [],
+                    layerNames: data.layerNames || [],
+                    layerGlbUrls: data.layerGlbUrls || [],
                     errorMessage: null,
                   },
                 }
@@ -2853,7 +2851,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
           )
         );
       });
-  }, [id, modelUrl, setNodes, data.layerGlbUrls, data.layerNames, apiFetch]);
+  }, [id, modelUrl, setNodes, data.layerFiles, data.layerGlbUrls, data.layerNames, apiFetch]);
 
   // Auto-organize when workflow is running and input is received from upstream (and not yet organized)
   useEffect(() => {
@@ -3159,7 +3157,764 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
 }
 
 /* ====================================================================
-   6. Video Preview Node
+   6. ComfyUI Video Gen Node
+   ==================================================================== */
+export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
+  const { setNodes } = useReactFlow();
+  const { workflowRunning, apiFetch } = useWorkflow();
+  const [modelUrl, setModelUrl] = useState<string | null>(data.modelUrl);
+  const [videoUrl, setVideoUrl] = useState<string | null>(data.videoUrl);
+  const [videoName, setVideoName] = useState<string | null>(data.videoName);
+  const [comfyStatus, setComfyStatus] = useState<ComfyStatus>(data.comfyStatus || 'idle');
+  const [progressText, setProgressText] = useState<string | null>(data.progressText);
+  const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
+  const [promptId, setPromptId] = useState<string | null>(data.promptId);
+  const [comfyOnline, setComfyOnline] = useState<boolean | null>(data.comfyOnline);
+  const [comfyVersion, setComfyVersion] = useState<string | null>(data.comfyVersion);
+  const [detectedInputDir, setDetectedInputDir] = useState<string | null>(data.detectedInputDir);
+  const [detectedOutputDir, setDetectedOutputDir] = useState<string | null>(data.detectedOutputDir);
+  const [detectedInput3dDir, setDetectedInput3dDir] = useState<string | null>(data.detectedInput3dDir);
+  const [comfyInput3dDir, setComfyInput3dDir] = useState<string>(data.comfyInput3dDir || '');
+  const [seedancePackStatus, setSeedancePackStatus] = useState<SeedancePackStatusResult | null>(null);
+  const [seedanceInstalling, setSeedanceInstalling] = useState(false);
+  const [seedanceMessage, setSeedanceMessage] = useState<string | null>(null);
+
+  const [comfyUrl, setComfyUrl] = useState(data.comfyUrl || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl);
+  const [prompt, setPrompt] = useState(data.prompt || DEFAULT_COMFY_VIDEO_PRESET.prompt);
+  const [videoResolution, setVideoResolution] = useState(data.videoResolution || DEFAULT_COMFY_VIDEO_PRESET.videoResolution);
+  const [ratio, setRatio] = useState(data.ratio || DEFAULT_COMFY_VIDEO_PRESET.ratio);
+  const [duration, setDuration] = useState(data.duration || DEFAULT_COMFY_VIDEO_PRESET.duration);
+  const [generateAudio, setGenerateAudio] = useState(data.generateAudio ?? DEFAULT_COMFY_VIDEO_PRESET.generateAudio);
+  const [seed, setSeed] = useState(data.seed ?? DEFAULT_COMFY_VIDEO_PRESET.seed);
+  const [watermark, setWatermark] = useState(data.watermark ?? DEFAULT_COMFY_VIDEO_PRESET.watermark);
+  const [sceneSelection, setSceneSelection] = useState(data.sceneSelection || DEFAULT_COMFY_VIDEO_PRESET.sceneSelection);
+  const [renderResolution, setRenderResolution] = useState(data.renderResolution || DEFAULT_COMFY_VIDEO_PRESET.renderResolution);
+  const [background, setBackground] = useState(data.background || DEFAULT_COMFY_VIDEO_PRESET.background);
+  const [cameraElevation, setCameraElevation] = useState(data.cameraElevation ?? DEFAULT_COMFY_VIDEO_PRESET.cameraElevation);
+  const [framePadding, setFramePadding] = useState(data.framePadding ?? DEFAULT_COMFY_VIDEO_PRESET.framePadding);
+  const [renderEngine, setRenderEngine] = useState(data.renderEngine || DEFAULT_COMFY_VIDEO_PRESET.renderEngine);
+  const [forceRender, setForceRender] = useState(data.forceRender ?? DEFAULT_COMFY_VIDEO_PRESET.forceRender);
+
+  useEffect(() => { setModelUrl(data.modelUrl); }, [data.modelUrl]);
+  useEffect(() => { setVideoUrl(data.videoUrl); }, [data.videoUrl]);
+  useEffect(() => { setVideoName(data.videoName); }, [data.videoName]);
+  useEffect(() => { setComfyStatus(data.comfyStatus || 'idle'); }, [data.comfyStatus]);
+  useEffect(() => { setProgressText(data.progressText); }, [data.progressText]);
+  useEffect(() => { setErrorMessage(data.errorMessage); }, [data.errorMessage]);
+  useEffect(() => { setPromptId(data.promptId); }, [data.promptId]);
+  useEffect(() => { setComfyOnline(data.comfyOnline); }, [data.comfyOnline]);
+  useEffect(() => { setComfyVersion(data.comfyVersion); }, [data.comfyVersion]);
+  useEffect(() => { setDetectedInputDir(data.detectedInputDir); }, [data.detectedInputDir]);
+  useEffect(() => { setDetectedOutputDir(data.detectedOutputDir); }, [data.detectedOutputDir]);
+  useEffect(() => { setDetectedInput3dDir(data.detectedInput3dDir); }, [data.detectedInput3dDir]);
+  useEffect(() => { setComfyInput3dDir(data.comfyInput3dDir || ''); }, [data.comfyInput3dDir]);
+
+  const handleDelete = useCallback(() => {
+    setNodes((nds) => nds.filter((n) => n.id !== id));
+  }, [id, setNodes]);
+
+  const isBlobUrl = (url: string | null): boolean => !!url && url.startsWith('blob:');
+
+  const commitSettings = useCallback((updates: ComfyVideoSettingsUpdates) => {
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id
+          ? { ...n, data: { ...n.data, ...updates } }
+          : n
+      )
+    );
+  }, [id, setNodes]);
+
+  const collectSettings = useCallback((): ComfyVideoRunSettings => ({
+    comfyUrl,
+    comfyInput3dDir: comfyInput3dDir.trim() || undefined,
+    model: data.model || DEFAULT_COMFY_VIDEO_PRESET.model,
+    prompt,
+    videoResolution,
+    ratio,
+    duration,
+    generateAudio,
+    seed,
+    watermark,
+    sceneSelection,
+    renderResolution,
+    background,
+    cameraElevation,
+    framePadding,
+    renderEngine,
+    forceRender,
+    filenamePrefix: data.filenamePrefix || DEFAULT_COMFY_VIDEO_PRESET.filenamePrefix,
+    format: data.format || DEFAULT_COMFY_VIDEO_PRESET.format,
+    codec: data.codec || DEFAULT_COMFY_VIDEO_PRESET.codec,
+  }), [
+    background,
+    cameraElevation,
+    comfyInput3dDir,
+    comfyUrl,
+    data.codec,
+    data.filenamePrefix,
+    data.format,
+    data.model,
+    duration,
+    forceRender,
+    framePadding,
+    generateAudio,
+    prompt,
+    ratio,
+    renderEngine,
+    renderResolution,
+    sceneSelection,
+    seed,
+    videoResolution,
+    watermark,
+  ]);
+
+  const applyPreset = useCallback((preset: ComfyVideoPreset) => {
+    setComfyUrl(preset.comfyUrl);
+    setPrompt(preset.prompt);
+    setVideoResolution(preset.videoResolution);
+    setRatio(preset.ratio);
+    setDuration(preset.duration);
+    setGenerateAudio(preset.generateAudio);
+    setSeed(preset.seed);
+    setWatermark(preset.watermark);
+    setSceneSelection(preset.sceneSelection);
+    setRenderResolution(preset.renderResolution);
+    setBackground(preset.background);
+    setCameraElevation(preset.cameraElevation);
+    setFramePadding(preset.framePadding);
+    setRenderEngine(preset.renderEngine);
+    setForceRender(preset.forceRender);
+    commitSettings(preset);
+  }, [commitSettings]);
+
+  const syncFromPreset = useCallback(() => {
+    fetch('/api/comfy-video-preset')
+      .then((res) => res.json())
+      .then((result) => {
+        if (!result.success) throw new Error(result.error || 'Preset sync failed');
+        applyPreset(result.preset as ComfyVideoPreset);
+        setErrorMessage(null);
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'Preset sync failed';
+        setErrorMessage(message);
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === id ? { ...n, data: { ...n.data, errorMessage: message, comfyStatus: 'error' as const } } : n
+          )
+        );
+      });
+  }, [applyPreset, id, setNodes]);
+
+  const updateRunState = useCallback((updates: Partial<ComfyVideoNodeData['data']>) => {
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...updates } } : n))
+    );
+  }, [id, setNodes]);
+
+  const refreshSeedancePackStatus = useCallback(() => {
+    const params = new URLSearchParams({ comfyUrl: comfyUrl.trim() || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl });
+    return fetch(`/api/comfy-seedance-status?${params.toString()}`)
+      .then((res) => res.json())
+      .then((result: SeedancePackStatusResult) => {
+        setSeedancePackStatus(result);
+        if (result.success === false && typeof result.error === 'string') {
+          setSeedanceMessage(result.error);
+        } else if (result.ready) {
+          setSeedanceMessage(null);
+        }
+        return result;
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'Seedance pack status check failed';
+        const result: SeedancePackStatusResult = { success: false, error: message };
+        setSeedancePackStatus(result);
+        setSeedanceMessage(message);
+        return result;
+      });
+  }, [comfyUrl]);
+
+  const refreshComfyStatus = useCallback(() => {
+    const params = new URLSearchParams({ comfyUrl: comfyUrl.trim() || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl });
+    fetch(`/api/comfy-video-status?${params.toString()}`)
+      .then((res) => res.json())
+      .then((result) => {
+        const online = result.online === true;
+        const nextVersion = typeof result.version === 'string' ? result.version : null;
+        const nextInputDir = typeof result.detectedInputDir === 'string' ? result.detectedInputDir : null;
+        const nextOutputDir = typeof result.detectedOutputDir === 'string' ? result.detectedOutputDir : null;
+        const nextInput3dDir = typeof result.detectedInput3dDir === 'string' ? result.detectedInput3dDir : null;
+        const nextError = online ? null : (typeof result.error === 'string' ? result.error : 'ComfyUI disconnected');
+        const nextComfyStatus = online && comfyStatus === 'error' && !videoUrl ? 'idle' : online ? comfyStatus : 'error';
+
+        setComfyOnline(online);
+        setComfyVersion(nextVersion);
+        setDetectedInputDir(nextInputDir);
+        setDetectedOutputDir(nextOutputDir);
+        setDetectedInput3dDir(nextInput3dDir);
+        setErrorMessage(nextError);
+        setComfyStatus(nextComfyStatus);
+        if (online) {
+          void refreshSeedancePackStatus();
+        } else {
+          setSeedancePackStatus(null);
+          setSeedanceMessage(null);
+        }
+
+        updateRunState({
+          comfyOnline: online,
+          comfyVersion: nextVersion,
+          detectedInputDir: nextInputDir,
+          detectedOutputDir: nextOutputDir,
+          detectedInput3dDir: nextInput3dDir,
+          errorMessage: nextError,
+          comfyStatus: nextComfyStatus,
+        });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'ComfyUI status check failed';
+        setComfyOnline(false);
+        setErrorMessage(message);
+        updateRunState({
+          comfyOnline: false,
+          comfyVersion: null,
+          detectedInputDir: null,
+          detectedOutputDir: null,
+          detectedInput3dDir: null,
+          errorMessage: message,
+          comfyStatus: 'error',
+        });
+        setSeedancePackStatus(null);
+        setSeedanceMessage(null);
+      });
+  }, [comfyStatus, comfyUrl, refreshSeedancePackStatus, updateRunState, videoUrl]);
+
+  const installSeedancePack = useCallback(() => {
+    setSeedanceInstalling(true);
+    setSeedanceMessage(null);
+    fetch('/api/install-comfy-seedance-pack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comfyUrl: comfyUrl.trim() || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl }),
+    })
+      .then((res) => res.json())
+      .then((result) => {
+        if (!result.success) {
+          throw new Error(typeof result.error === 'string' ? result.error : 'Seedance pack installation failed');
+        }
+        setSeedanceMessage(result.restartRequired ? 'Installed. Restart ComfyUI, then Check again.' : 'Seedance pack already installed.');
+        return refreshSeedancePackStatus();
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'Seedance pack installation failed';
+        setSeedanceMessage(message);
+      })
+      .finally(() => {
+        setSeedanceInstalling(false);
+      });
+  }, [comfyUrl, refreshSeedancePackStatus]);
+
+  useEffect(() => {
+    refreshComfyStatus();
+  }, [refreshComfyStatus]);
+
+  const handleGenerate = useCallback(() => {
+    const inputModelUrl = modelUrl;
+    if (!inputModelUrl || isBlobUrl(inputModelUrl)) {
+      const message = 'Model file unavailable, please wait for upload';
+      setErrorMessage(message);
+      updateRunState({ errorMessage: message, comfyStatus: 'error' });
+      return;
+    }
+    if (seedancePackStatus && seedancePackStatus.ready === false) {
+      const message = 'Seedance ComfyUI pack is missing or ComfyUI needs restart. Install it and check again before generating.';
+      setErrorMessage(message);
+      updateRunState({ errorMessage: message, comfyStatus: 'error' });
+      return;
+    }
+
+    const settings = collectSettings();
+    setComfyStatus('processing');
+    setProgressText('Submitting to ComfyUI...');
+    setErrorMessage(null);
+    updateRunState({
+      ...settings,
+      comfyStatus: 'processing',
+      progressText: 'Submitting to ComfyUI...',
+      errorMessage: null,
+      videoUrl: null,
+      videoName: null,
+      promptId: null,
+    });
+
+    apiFetch('/api/generate-comfy-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelUrl: inputModelUrl, settings }),
+    })
+      .then((res) => res.json())
+      .then((result) => {
+        if (!result.success) {
+          throw new Error(result.error || 'ComfyUI video generation failed');
+        }
+        const nextVideoUrl = result.videoUrl as string;
+        const nextVideoName = typeof result.videoName === 'string' ? result.videoName : 'ComfyUI Video';
+        const nextPromptId = typeof result.promptId === 'string' ? result.promptId : null;
+        const nextInputDir = typeof result.detectedInputDir === 'string' ? result.detectedInputDir : null;
+        const nextOutputDir = typeof result.detectedOutputDir === 'string' ? result.detectedOutputDir : null;
+        const nextInput3dDir = typeof result.detectedInput3dDir === 'string' ? result.detectedInput3dDir : null;
+
+        setComfyStatus('done');
+        setProgressText('ComfyUI video ready');
+        setVideoUrl(nextVideoUrl);
+        setVideoName(nextVideoName);
+        setPromptId(nextPromptId);
+        setComfyOnline(true);
+        setDetectedInputDir(nextInputDir);
+        setDetectedOutputDir(nextOutputDir);
+        setDetectedInput3dDir(nextInput3dDir);
+        setErrorMessage(null);
+
+        recordAsset({
+          name: nextVideoName,
+          assetType: 'render-video',
+          fileUrl: nextVideoUrl,
+          fileType: 'mp4',
+          sourceNode: 'comfyVideo',
+        });
+        updateRunState({
+          comfyStatus: 'done',
+          progressText: 'ComfyUI video ready',
+          videoUrl: nextVideoUrl,
+          videoName: nextVideoName,
+          promptId: nextPromptId,
+          comfyOnline: true,
+          detectedInputDir: nextInputDir,
+          detectedOutputDir: nextOutputDir,
+          detectedInput3dDir: nextInput3dDir,
+          errorMessage: null,
+        });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'ComfyUI video generation failed';
+        setComfyStatus('error');
+        setProgressText(null);
+        setErrorMessage(message);
+        updateRunState({ comfyStatus: 'error', progressText: null, errorMessage: message });
+      });
+  }, [apiFetch, collectSettings, modelUrl, seedancePackStatus, updateRunState]);
+
+  useEffect(() => {
+    if (!workflowRunning) return;
+    if (modelUrl && !isBlobUrl(modelUrl) && !videoUrl && comfyStatus !== 'processing') {
+      handleGenerate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowRunning, modelUrl]);
+
+  const visualStatus: NodeVisualStatus =
+    comfyStatus === 'processing' ? 'processing' : comfyStatus === 'done' ? 'done' : comfyStatus === 'error' ? 'error' : 'idle';
+  const effectiveInput3dDir = comfyInput3dDir.trim() || detectedInput3dDir;
+  const connectionLabel = comfyOnline === true ? 'connected' : comfyOnline === false ? 'disconnected' : 'checking';
+  const seedanceReady = seedancePackStatus?.ready === true;
+  const seedanceInstalled = seedancePackStatus?.installed === true;
+  const seedanceLoaded = seedancePackStatus?.loaded === true;
+  const seedancePackLabel = seedanceReady
+    ? seedanceInstalled ? 'ready' : 'ready, workflow missing'
+    : seedancePackStatus
+      ? seedanceInstalled && !seedanceLoaded
+        ? 'restart needed'
+        : 'missing'
+      : 'unchecked';
+  const missingSeedanceItems = [
+    ...(seedancePackStatus?.missingCustomNodeFolders || []),
+    ...(seedancePackStatus?.missingWorkflowFiles || []),
+    ...(seedancePackStatus?.missingNodeTypes || []),
+  ];
+
+  return (
+    <div
+      style={getNodeFrameStyle('comfyVideo', visualStatus)}
+      className={NODE_FRAME_CLASS_NAME}
+    >
+      <NodeHeader type="comfyVideo" onDelete={handleDelete} />
+      <HandleBar ports={[
+        { type: 'target', id: 'model-input', label: 'Model', color: '#7a4a55' },
+        { type: 'source', id: 'video-output', label: 'Video', color: '#5f8f74' },
+      ]} />
+      <div className="space-y-2 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <StatusBadge status={visualStatus} />
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); syncFromPreset(); }}
+            className="nodrag flex h-7 items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900/70 px-2 text-[10px] text-zinc-300 transition-colors hover:bg-zinc-800"
+          >
+            <RotateCcw size={11} />
+            Sync preset
+          </button>
+        </div>
+
+        <PreviewBox className="h-[88px]" placeholder="Waiting for model">
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-3 text-center">
+            {comfyStatus === 'processing' ? (
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#5f8f74] border-t-transparent" />
+            ) : videoUrl ? (
+              <Sparkles size={20} className="text-[#bde6ce]" />
+            ) : (
+              <Box size={20} className="text-zinc-500" />
+            )}
+            <span className="max-w-full truncate text-[10px] text-zinc-400">
+              {progressText || (videoUrl ? 'ComfyUI video ready' : modelUrl ? 'Model ready' : 'Waiting for model input')}
+            </span>
+            {promptId && <span className="max-w-full truncate text-[9px] text-zinc-500">Prompt {promptId}</span>}
+          </div>
+        </PreviewBox>
+
+        <label className="block space-y-1">
+          <span className="text-[10px] text-zinc-400">ComfyUI URL</span>
+          <input
+            value={comfyUrl}
+            onChange={(event) => {
+              setComfyUrl(event.target.value);
+              commitSettings({ comfyUrl: event.target.value });
+            }}
+            className="nodrag w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200 outline-none focus:border-[#5f8f74]"
+          />
+        </label>
+
+        <details className="nodrag rounded-md border border-zinc-700/70 bg-zinc-900/50 px-2 py-1 text-[10px] text-zinc-400">
+          <summary className="cursor-pointer">
+            <span className="ml-1 inline-flex w-[calc(100%-1rem)] items-center justify-between gap-2 align-middle">
+              <span>
+                ComfyUI: <span className={comfyOnline ? 'text-[#bde6ce]' : 'text-[#8a5a5a]'}>{connectionLabel}</span>
+                {comfyVersion ? <span className="text-zinc-500"> · {comfyVersion}</span> : null}
+              </span>
+              <button
+                type="button"
+                onClick={(event) => { event.preventDefault(); event.stopPropagation(); refreshComfyStatus(); }}
+                className="nodrag rounded border border-zinc-700 px-1.5 py-0.5 text-[9px] text-zinc-300 hover:bg-zinc-800"
+              >
+                Check
+              </button>
+            </span>
+          </summary>
+          <div className="mt-2 space-y-0.5">
+            <div className="truncate text-zinc-500" title={effectiveInput3dDir || undefined}>
+              Input/3D: {effectiveInput3dDir || 'Not detected'}
+            </div>
+            <div className="truncate text-zinc-500" title={detectedOutputDir || undefined}>
+              Output: {detectedOutputDir || 'Not detected'}
+            </div>
+            {detectedInputDir ? (
+              <div className="truncate text-zinc-500" title={detectedInputDir}>
+                Input: {detectedInputDir}
+              </div>
+            ) : null}
+          </div>
+        </details>
+
+        <details className="nodrag rounded-md border border-zinc-700/70 bg-zinc-900/50 px-2 py-1 text-[10px] text-zinc-400">
+          <summary className="cursor-pointer">
+            <span className="ml-1 inline-flex w-[calc(100%-1rem)] items-center justify-between gap-2 align-middle">
+              <span>
+                Seedance pack:{' '}
+                <span className={seedanceReady ? 'text-[#bde6ce]' : seedancePackStatus ? 'text-[#d6b36a]' : 'text-zinc-500'}>
+                  {seedancePackLabel}
+                </span>
+              </span>
+              <span className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); void refreshSeedancePackStatus(); }}
+                  disabled={comfyOnline !== true}
+                  className="nodrag rounded border border-zinc-700 px-1.5 py-0.5 text-[9px] text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Check
+                </button>
+                {!seedanceInstalled && (
+                  <button
+                    type="button"
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); installSeedancePack(); }}
+                    disabled={comfyOnline !== true || seedanceInstalling}
+                    className="nodrag rounded border border-[#5f8f74]/60 bg-[#5f8f74]/20 px-1.5 py-0.5 text-[9px] text-[#bde6ce] hover:bg-[#5f8f74]/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {seedanceInstalling ? 'Installing' : 'Install'}
+                  </button>
+                )}
+              </span>
+            </span>
+          </summary>
+          <div className="mt-2 space-y-0.5">
+            {seedancePackStatus?.customNodesDir ? (
+              <div className="truncate text-zinc-500" title={seedancePackStatus.customNodesDir}>
+                Custom nodes: {seedancePackStatus.customNodesDir}
+              </div>
+            ) : null}
+            {seedancePackStatus?.workflowsDir ? (
+              <div className="truncate text-zinc-500" title={seedancePackStatus.workflowsDir}>
+                Workflows: {seedancePackStatus.workflowsDir}
+              </div>
+            ) : null}
+            {missingSeedanceItems.length > 0 ? (
+              <div className="truncate text-[#d6b36a]" title={missingSeedanceItems.join(', ')}>
+                Missing: {missingSeedanceItems.join(', ')}
+              </div>
+            ) : null}
+            {seedanceMessage ? (
+              <div className="text-[#d6b36a]">
+                {seedanceMessage}
+              </div>
+            ) : null}
+          </div>
+        </details>
+
+        <label className="block space-y-1">
+          <span className="text-[10px] text-zinc-400">Prompt</span>
+          <textarea
+            value={prompt}
+            onChange={(event) => {
+              setPrompt(event.target.value);
+              commitSettings({ prompt: event.target.value });
+            }}
+            rows={4}
+            className="nodrag nowheel w-full resize-none rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] leading-4 text-zinc-200 outline-none focus:border-[#5f8f74]"
+          />
+        </label>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="space-y-1">
+            <span className="text-[10px] text-zinc-400">Video</span>
+            <select
+              value={videoResolution}
+              onChange={(event) => {
+                setVideoResolution(event.target.value);
+                commitSettings({ videoResolution: event.target.value });
+              }}
+              className="nodrag w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+            >
+              <option value="480p">480p</option>
+              <option value="720p">720p</option>
+              <option value="1080p">1080p</option>
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-[10px] text-zinc-400">Ratio</span>
+            <select
+              value={ratio}
+              onChange={(event) => {
+                setRatio(event.target.value);
+                commitSettings({ ratio: event.target.value });
+              }}
+              className="nodrag w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+            >
+              {['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'].map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-[10px] text-zinc-400">Duration</span>
+            <input
+              type="number"
+              min={4}
+              max={15}
+              value={duration}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setDuration(next);
+                commitSettings({ duration: next });
+              }}
+              className="nodrag w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-[10px] text-zinc-400">Seed</span>
+            <input
+              type="number"
+              value={seed}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setSeed(next);
+                commitSettings({ seed: next });
+              }}
+              className="nodrag w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+            />
+          </label>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="flex items-center gap-2 text-[10px] text-zinc-300">
+            <input
+              type="checkbox"
+              checked={generateAudio}
+              onChange={(event) => {
+                setGenerateAudio(event.target.checked);
+                commitSettings({ generateAudio: event.target.checked });
+              }}
+              className="nodrag"
+            />
+            Audio
+          </label>
+          <label className="flex items-center gap-2 text-[10px] text-zinc-300">
+            <input
+              type="checkbox"
+              checked={watermark}
+              onChange={(event) => {
+                setWatermark(event.target.checked);
+                commitSettings({ watermark: event.target.checked });
+              }}
+              className="nodrag"
+            />
+            Watermark
+          </label>
+        </div>
+
+        <details className="nodrag rounded-md border border-zinc-700/70 bg-zinc-900/50 px-2 py-1">
+          <summary className="cursor-pointer text-[10px] text-zinc-400">Render preset</summary>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <label className="col-span-2 space-y-1">
+              <span className="text-[10px] text-zinc-500">Override input/3d path</span>
+              <input
+                value={comfyInput3dDir}
+                placeholder={detectedInput3dDir || 'Use auto-detected path'}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setComfyInput3dDir(next);
+                  commitSettings({ comfyInput3dDir: next || null });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200 outline-none focus:border-[#5f8f74]"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] text-zinc-500">Image res</span>
+              <select
+                value={renderResolution}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setRenderResolution(next);
+                  commitSettings({ renderResolution: next });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+              >
+                {[512, 768, 1024, 1536].map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] text-zinc-500">Background</span>
+              <select
+                value={background}
+                onChange={(event) => {
+                  setBackground(event.target.value);
+                  commitSettings({ background: event.target.value });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+              >
+                {['深灰影棚', '纯黑', '纯白', '透明'].map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] text-zinc-500">Camera elev.</span>
+              <input
+                type="number"
+                value={cameraElevation}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setCameraElevation(next);
+                  commitSettings({ cameraElevation: next });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] text-zinc-500">Padding</span>
+              <input
+                type="number"
+                step={0.01}
+                value={framePadding}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setFramePadding(next);
+                  commitSettings({ framePadding: next });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+              />
+            </label>
+            <label className="col-span-2 space-y-1">
+              <span className="text-[10px] text-zinc-500">Render engine</span>
+              <select
+                value={renderEngine}
+                onChange={(event) => {
+                  setRenderEngine(event.target.value);
+                  commitSettings({ renderEngine: event.target.value });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+              >
+                <option value="Eevee（快速）">Eevee（快速）</option>
+                <option value="Cycles（高质量）">Cycles（高质量）</option>
+              </select>
+            </label>
+            <label className="col-span-2 flex items-center gap-2 text-[10px] text-zinc-300">
+              <input
+                type="checkbox"
+                checked={forceRender}
+                onChange={(event) => {
+                  setForceRender(event.target.checked);
+                  commitSettings({ forceRender: event.target.checked });
+                }}
+              />
+              Force render
+            </label>
+            <label className="col-span-2 space-y-1">
+              <span className="text-[10px] text-zinc-500">Scene</span>
+              <select
+                value={sceneSelection}
+                onChange={(event) => {
+                  setSceneSelection(event.target.value);
+                  commitSettings({ sceneSelection: event.target.value });
+                }}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-200"
+              >
+                <option value="场景全部对象">场景全部对象</option>
+                <option value="自动选择靠近原点的单件">自动选择靠近原点的单件</option>
+              </select>
+            </label>
+          </div>
+        </details>
+
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); handleGenerate(); }}
+          disabled={comfyStatus === 'processing' || !modelUrl || isBlobUrl(modelUrl)}
+          className="nodrag flex w-full items-center justify-center gap-1.5 rounded-md bg-[#5f8f74]/30 px-3 py-1.5 text-[10px] font-medium text-[#bde6ce] transition-colors hover:bg-[#5f8f74]/45 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {comfyStatus === 'processing' ? (
+            <>
+              <div className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-[#bde6ce] border-t-transparent" />
+              Generating...
+            </>
+          ) : (
+            <>
+              <Sparkles size={11} />
+              Generate ComfyUI video
+            </>
+          )}
+        </button>
+
+        {videoUrl && <p className="truncate text-[10px] text-[#5f8f74]">{videoName || 'ComfyUI Video'}</p>}
+        {errorMessage && <p className="text-[10px] text-[#8a5a5a]">{errorMessage}</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ====================================================================
+   7. Video Preview Node
    ==================================================================== */
 export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) {
   const { setNodes } = useReactFlow();
@@ -3292,6 +4047,7 @@ export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) 
     >
       <NodeHeader type="videoPreview" onDelete={handleDelete} />
       <HandleBar ports={[
+        { type: 'target', id: 'video-input', label: 'Video', color: '#5f8f74' },
         { type: 'target', id: 'obj-input', label: 'Model', color: '#7a4a55' },
         { type: 'source', id: 'output', label: 'Video', color: '#4a6a8a' },
       ]} />
@@ -4636,6 +5392,20 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
           <p className="truncate text-[10px] text-zinc-400">Model: {objFileName}</p>
         )}
 
+        {/* Apply: legacy = full Blender; per-layer GLBs = server merge url_b ?? url_a only */}
+        {(data.modelUrl || hasPerLayerGlbs) && (
+          <button
+            onClick={(e) => { e.stopPropagation(); sendToBlender(); }}
+            disabled={surfaceControlsLocked || isUploading}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#5a7068]/30 px-3 py-1.5 text-[10px] font-medium text-[#8aaa98] transition-colors hover:bg-[#5a7068]/50 disabled:cursor-not-allowed disabled:opacity-50 nodrag"
+          >
+            {blenderProcessing && (
+              <div className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-[#7a9a88] border-t-[#5a7068]" />
+            )}
+            Apply Blender Render
+          </button>
+        )}
+
         {/* ---- Principled BSDF Material Parameters Panel ---- */}
         {selectedLayer && (
           <div
@@ -4817,28 +5587,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
               </div>
             </ParamRow>
           </div>
-        )}
-
-        {/* Apply: legacy = full Blender; per-layer GLBs = server merge url_b ?? url_a only */}
-        {(data.modelUrl || hasPerLayerGlbs) && (
-          <button
-            onClick={(e) => { e.stopPropagation(); sendToBlender(); }}
-            disabled={surfaceControlsLocked || isUploading}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#5a7068]/30 px-3 py-1.5 text-[10px] font-medium text-[#8aaa98] transition-colors hover:bg-[#5a7068]/50 disabled:opacity-50 disabled:cursor-not-allowed nodrag"
-          >
-            {blenderProcessing ? (
-              <>
-                <div className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-[#7a9a88] border-t-[#5a7068]" />
-                {hasPerLayerGlbs ? 'Merging on server…' : 'Rendering...'}
-              </>
-            ) : (
-              hasPerLayerGlbs
-                ? 'Apply Blender Render (merge layers → downstream)'
-                : selectedLayer
-                  ? 'Apply Blender Render'
-                  : 'Apply Blender Render (All Layers)'
-            )}
-          </button>
         )}
 
         {/* ---- Light Settings Panel ---- */}
@@ -5033,8 +5781,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.meshStatus, data.outputUrl, data.outputType, layerGlbUrls, data.layerNames, data.layerFiles]);
 
-  // History: once per new output URL. Assets: terminal GLB only, re-evaluated when edges change
-  // (separate refs so disconnecting downstream can still publish the same URL to the library).
+  // History: once per new output URL. Assets: publish reusable mesh model outputs once.
   const lastHistoryModelUrl = useRef<string | null>(null);
   const lastAssetLibraryModelUrl = useRef<string | null>(null);
   useEffect(() => {
@@ -5054,20 +5801,54 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       });
     }
 
-    const hasDownstream = getEdges().some((e) => e.source === id);
-    const isTerminalGlb = data.outputType === 'glb' && !hasDownstream;
-    if (isTerminalGlb && data.outputUrl !== lastAssetLibraryModelUrl.current) {
-      lastAssetLibraryModelUrl.current = data.outputUrl;
-      recordAsset({
-        name: `${sourceLabel}_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
-        assetType: 'model',
-        fileUrl: data.outputUrl,
-        fileType: 'glb',
-        thumbnailUrl,
-        sourceNode: 'modelGeneration',
+    const assetCandidate = selectMeshGenerationAssetCandidate({
+      outputType: data.outputType,
+      outputUrl: data.outputUrl,
+      layerGlbUrls: data.layerGlbUrls,
+      layerNames: data.layerNames,
+    });
+    const assetFingerprint = assetCandidate?.kind === 'merge-layers'
+      ? `layers:${assetCandidate.layerGlbUrls.join('|')}`
+      : assetCandidate?.fileUrl || null;
+    if (assetCandidate && assetFingerprint && assetFingerprint !== lastAssetLibraryModelUrl.current) {
+      lastAssetLibraryModelUrl.current = assetFingerprint;
+      void (async () => {
+        let assetFileUrl = assetCandidate.fileUrl;
+        let assetFileType = assetCandidate.fileType;
+        if (assetCandidate.kind === 'merge-layers') {
+          const mergeResponse = await apiFetch('/api/merge-glb', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              glbPaths: assetCandidate.layerGlbUrls,
+              names: assetCandidate.layerNames,
+            }),
+          });
+          const merged = await mergeResponse.json();
+          if (!mergeResponse.ok || !merged.success || typeof merged.mergedGlbUrl !== 'string') {
+            throw new Error(typeof merged.error === 'string' ? merged.error : 'Failed to merge layer GLBs for Assets');
+          }
+          assetFileUrl = merged.mergedGlbUrl;
+          assetFileType = 'glb';
+        }
+
+        const modelThumbnailUrl = thumbnailUrl ?? await createAssetThumbnail({
+          fileUrl: assetFileUrl!,
+          ephemeralSessionId,
+        });
+        await recordAsset({
+          name: `${sourceLabel}_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
+          assetType: 'model',
+          fileUrl: assetFileUrl!,
+          fileType: assetFileType,
+          thumbnailUrl: modelThumbnailUrl,
+          sourceNode: 'modelGeneration',
+        });
+      })().catch((error: unknown) => {
+        console.error('[modelGeneration] Failed to publish mesh asset:', error);
       });
     }
-  }, [data.meshStatus, data.outputUrl, data.outputType, inputType, renderUrl, data.renderUrl, id, getEdges]);
+  }, [apiFetch, data.meshStatus, data.outputUrl, data.outputType, data.layerGlbUrls, data.layerNames, inputType, renderUrl, data.renderUrl, ephemeralSessionId]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -5224,109 +6005,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       setOutputFormat('glb');
     }
 
-    const useLayerPlys =
-      (data.layerFiles?.length ?? 0) > 0 &&
-      requestedOutputFormat === 'glb' &&
-      (inputType === 'ply' || (modelUrl && modelUrl.toLowerCase().split('?')[0].endsWith('.ply')));
-
-    if (useLayerPlys) {
-      const plys = data.layerFiles as string[];
-      const names = (data.layerNames && data.layerNames.length === plys.length
-        ? data.layerNames
-        : plys.map((_, i) => `layer_${i}`)) as string[];
-
-      setMeshStatus('processing');
-      setErrorMessage(null);
-      setNodes((nds) =>
-        nds.map((n) =>
-          n.id === id
-            ? { ...n, data: { ...n.data, meshStatus: 'processing' as const, errorMessage: null } }
-            : n
-        )
-      );
-
-      (async () => {
-        try {
-          const outGlbs: string[] = [];
-          let totalFaces = 0;
-          for (const ply of plys) {
-            if (isBlobUrl(ply)) {
-              throw new Error('A layer PLY is still uploading');
-            }
-            const res = await apiFetch('/api/generate-mesh', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                plyUrl: ply,
-                outputFormat: 'glb' as const,
-                ephemeralSessionId,
-              }),
-            });
-            const result = await res.json();
-            if (!result.success) {
-              throw new Error(result.error || 'Failed to start mesh generation for a layer');
-            }
-            const done = await waitForMeshTask(result.taskId, apiFetch);
-            outGlbs.push(done.meshUrl);
-            totalFaces += done.faceCount;
-          }
-          const mergeRes = await apiFetch('/api/merge-glb', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ glbPaths: outGlbs, names }),
-          });
-          const merged = await mergeRes.json();
-          if (!mergeRes.ok || !merged.success) {
-            throw new Error(merged.error || 'Failed to merge layer GLBs');
-          }
-          const mergedUrl = merged.mergedGlbUrl as string;
-          setLayerGlbUrls(outGlbs);
-          setMeshStatus('done');
-          setOutputUrl(mergedUrl);
-          setOutputType('glb');
-          setModelUrl(mergedUrl);
-          setInputType('glb');
-          setFaceCount(totalFaces);
-          setErrorMessage(null);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? {
-                    ...n,
-                    data: {
-                      ...n.data,
-                      meshStatus: 'done' as const,
-                      modelUrl: mergedUrl,
-                      inputType: 'glb' as const,
-                      outputUrl: mergedUrl,
-                      outputType: 'glb' as const,
-                      faceCount: totalFaces,
-                      layerGlbUrls: outGlbs,
-                      layerNames: data.layerNames || names,
-                      layerFiles: data.layerFiles || plys,
-                      errorMessage: null,
-                    },
-                  }
-                : n
-            )
-          );
-        } catch (e) {
-          const message = e instanceof Error ? e.message : 'Per-layer mesh failed';
-          setMeshStatus('error');
-          setErrorMessage(message);
-          setLayerGlbUrls([]);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: message, layerGlbUrls: [] } }
-                : n
-            )
-          );
-        }
-      })();
-      return;
-    }
-
     setMeshStatus('processing');
     setErrorMessage(null);
     setNodes((nds) =>
@@ -5367,7 +6045,16 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
               if (task.status === 'processing') {
                 setTimeout(poll, 2000);
               } else if (task.status === 'done' && task.result) {
-                const { meshUrl, meshFormat, faceCount: fc } = task.result;
+                const {
+                  meshUrl,
+                  meshFormat,
+                  faceCount: fc,
+                  layerGlbUrls: nextLayerGlbUrls = [],
+                  layerNames: nextLayerNames = [],
+                  segmentationProfile,
+                  segmentationLabelCount,
+                  segmentationMetadataUrl,
+                } = task.result;
                 const resolvedType = meshFormat as 'glb' | 'obj' | 'ply';
                 const nextInputType = inputType === 'splat'
                   ? 'splat' as const
@@ -5376,7 +6063,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                     : resolvedType === 'glb'
                       ? 'glb' as const
                       : 'obj' as const;
-                setLayerGlbUrls([]);
+                setLayerGlbUrls(nextLayerGlbUrls);
                 setMeshStatus('done');
                 setOutputUrl(meshUrl);
                 setOutputType(resolvedType);
@@ -5397,7 +6084,12 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                             outputUrl: meshUrl,
                             outputType: resolvedType,
                             faceCount: fc,
-                            layerGlbUrls: [] as string[],
+                            layerGlbUrls: nextLayerGlbUrls,
+                            layerNames: nextLayerNames,
+                            layerFiles: [] as string[],
+                            segmentationProfile,
+                            segmentationLabelCount,
+                            segmentationMetadataUrl,
                             errorMessage: null,
                           },
                         }
@@ -5457,7 +6149,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           )
         );
       });
-  }, [id, modelUrl, outputFormat, setNodes, data.layerFiles, data.layerNames, inputType, apiFetch, ephemeralSessionId]);
+  }, [id, modelUrl, outputFormat, setNodes, inputType, apiFetch, ephemeralSessionId]);
 
   // Process model + PNG: extract textures, metadata, UV completion, apply texture, render
   // Routes to /api/process-glb for GLB input, /api/process-obj for OBJ input

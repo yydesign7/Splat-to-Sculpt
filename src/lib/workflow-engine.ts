@@ -18,6 +18,7 @@ const SOURCE_HANDLE_MAP: Record<string, string> = {
   'modelOrganize.obj-output': 'outputUrl',
   'modelSurface.obj-output': 'outputModelUrl',
   'modelGeneration.output': 'outputUrl',
+  'comfyVideo.video-output': 'videoUrl',
 };
 
 /**
@@ -103,6 +104,20 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
   'videoPreview.obj-input': (value, _sourceNodeType, sourceNodeData) => {
     const result: Record<string, unknown> = { modelUrl: value as string };
     // Forward lightParams from source node data if present
+    if (sourceNodeData?.lightParams) {
+      result.lightParams = sourceNodeData.lightParams;
+    }
+    return result;
+  },
+  'videoPreview.video-input': (value, _sourceNodeType, sourceNodeData) => {
+    const result: Record<string, unknown> = { videoUrl: value as string };
+    if (typeof sourceNodeData?.videoName === 'string') {
+      result.videoName = sourceNodeData.videoName;
+    }
+    return result;
+  },
+  'comfyVideo.model-input': (value, _sourceNodeType, sourceNodeData) => {
+    const result: Record<string, unknown> = { modelUrl: value as string };
     if (sourceNodeData?.lightParams) {
       result.lightParams = sourceNodeData.lightParams;
     }
@@ -227,7 +242,7 @@ export function getNodeTriggerInfo(
 
       return { canTrigger, reason, requiredInputs, satisfiedInputs };
     }
-    case 'videoPreview': {
+    case 'comfyVideo': {
       const hasModel = !!d.modelUrl;
       const hasIncomingEdge = incomingEdges.length > 0;
       if (!hasIncomingEdge) {
@@ -238,6 +253,20 @@ export function getNodeTriggerInfo(
         reason: hasModel ? 'Model data ready' : 'Waiting for model input',
         requiredInputs: ['model'],
         satisfiedInputs: hasModel ? ['model'] : [],
+      };
+    }
+    case 'videoPreview': {
+      const hasModel = !!d.modelUrl;
+      const hasVideo = !!d.videoUrl;
+      const hasIncomingEdge = incomingEdges.length > 0;
+      if (!hasIncomingEdge) {
+        return { canTrigger: false, reason: 'No upstream connection, manual upload required', requiredInputs: [], satisfiedInputs: [] };
+      }
+      return {
+        canTrigger: hasModel || hasVideo,
+        reason: hasVideo ? 'Video data ready' : hasModel ? 'Model data ready' : 'Waiting for video or model input',
+        requiredInputs: ['video or model'],
+        satisfiedInputs: hasVideo ? ['video'] : hasModel ? ['model'] : [],
       };
     }
     case 'stickyNote':
@@ -327,6 +356,8 @@ export function isNodeDone(node: Node | undefined): boolean {
       return !!d.outputModelUrl && !d.blenderProcessing;
     case 'modelGeneration':
       return d.meshStatus === 'done';
+    case 'comfyVideo':
+      return d.comfyStatus === 'done' && !!d.videoUrl;
     case 'videoPreview':
       return !!d.videoUrl && !d.videoGenerating;
     case 'stickyNote':
@@ -355,6 +386,8 @@ export function isNodeProcessing(node: Node | undefined): boolean {
       return d.organizeStatus === 'organizing';
     case 'modelGeneration':
       return d.meshStatus === 'processing';
+    case 'comfyVideo':
+      return d.comfyStatus === 'processing';
     case 'videoPreview':
       return !!d.videoGenerating;
     case 'stickyNote':
@@ -379,6 +412,8 @@ export function isNodeError(node: Node | undefined): boolean {
       return d.organizeStatus === 'error';
     case 'modelGeneration':
       return d.meshStatus === 'error';
+    case 'comfyVideo':
+      return d.comfyStatus === 'error';
     case 'modelSurface':
       return !!d.blenderError;
     case 'videoPreview':

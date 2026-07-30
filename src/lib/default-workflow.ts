@@ -1,4 +1,5 @@
 import type { Edge, Node } from '@xyflow/react';
+import { buildDefaultComfyVideoNodeData } from '@/lib/comfyui-video-preset';
 
 export const DEFAULT_WORKFLOW_ID = 'preset_default_workflow';
 export const DEFAULT_WORKFLOW_NAME = 'Default Workflow';
@@ -22,7 +23,7 @@ export const initialNodes: Node[] = [
     id: 'gs1',
     type: 'gaussianSplat',
     position: { x: 750, y: 80 },
-    data: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, enableFastSegmentation: true, layerFiles: [], layerNames: [] },
+    data: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, layerFiles: [], layerNames: [] },
   },
   {
     id: '4',
@@ -44,12 +45,11 @@ export const initialNodes: Node[] = [
     position: { x: 1450, y: 80 },
     data: { label: 'Surface Processing', materialFileName: null, materialPreviewUrl: null, modelUrl: null, outputModelUrl: null, outputModelType: null, selectedLayer: null, blenderProcessing: false, blenderError: null, materialParams: { base_color: [0.8, 0.75, 0.7], metallic: 0.0, roughness: 0.5, emissive_color: [0.0, 0.0, 0.0], emissive_strength: 0.0, alpha: 1.0, normal_scale: 1.0 }, renderUrl: null, layerParams: {}, lightParams: { ambientIntensity: 0.6, mainLightIntensity: 0.8, mainLightColor: [1, 1, 1], mainLightAzimuth: 45, mainLightElevation: 45, fillLightIntensity: 0.3, fillLightAzimuth: -135, fillLightElevation: 30, exposure: 1.0 }, layerFiles: [], layerNames: [], layerGlbUrls: [], layerUrlA: {}, layerUrlB: {}, layerUrlC: {} },
   },
-  // Second Mesh Gen: top-aligned with surface (y=80)
   {
-    id: '8',
-    type: 'modelGeneration',
+    id: '11',
+    type: 'comfyVideo',
     position: { x: 1800, y: 80 },
-    data: { label: 'Mesh Gen', modelUrl: null, isFullscreen: false, inputType: null, outputUrl: null, outputType: null, textureUrl: null, meshStatus: 'idle', outputFormat: 'glb', errorMessage: null, faceCount: null, gaussianCount: null, computeBackend: null, renderUrl: null, lightParams: null, layerFiles: [], layerNames: [], layerGlbUrls: [] },
+    data: buildDefaultComfyVideoNodeData(),
   },
   {
     id: '9',
@@ -90,7 +90,7 @@ export const initialEdges: Edge[] = [
     sourceHandle: 'output',
     target: '2',
     targetHandle: 'input',
-    type: 'default',
+    type: 'workflow',
     animated: false,
     style: { stroke: '#4a6a8a', strokeWidth: 2, strokeDasharray: '5 3' },
   },
@@ -100,7 +100,7 @@ export const initialEdges: Edge[] = [
     sourceHandle: 'output',
     target: 'gs1',
     targetHandle: 'input',
-    type: 'default',
+    type: 'workflow',
     animated: false,
     style: { stroke: '#6b5f7a', strokeWidth: 2, strokeDasharray: '5 3' },
   },
@@ -110,7 +110,7 @@ export const initialEdges: Edge[] = [
     sourceHandle: 'splat-output',
     target: '4',
     targetHandle: 'model-input',
-    type: 'default',
+    type: 'workflow',
     animated: false,
     style: { stroke: '#6f5aa8', strokeWidth: 2, strokeDasharray: '5 3' },
   },
@@ -120,7 +120,7 @@ export const initialEdges: Edge[] = [
     sourceHandle: 'output',
     target: '10',
     targetHandle: 'obj-input',
-    type: 'default',
+    type: 'workflow',
     animated: false,
     style: { stroke: '#7a4a55', strokeWidth: 2, strokeDasharray: '5 3' },
   },
@@ -130,29 +130,29 @@ export const initialEdges: Edge[] = [
     sourceHandle: 'obj-output',
     target: '7',
     targetHandle: 'obj-input',
-    type: 'default',
+    type: 'workflow',
     animated: false,
     style: { stroke: '#7a4a55', strokeWidth: 2, strokeDasharray: '5 3' },
   },
   {
-    id: 'e7-8',
+    id: 'e7-11',
     source: '7',
     sourceHandle: 'obj-output',
-    target: '8',
+    target: '11',
     targetHandle: 'model-input',
-    type: 'default',
+    type: 'workflow',
     animated: false,
     style: { stroke: '#7a4a55', strokeWidth: 2, strokeDasharray: '5 3' },
   },
   {
-    id: 'e7-9',
-    source: '7',
-    sourceHandle: 'obj-output',
+    id: 'e11-9',
+    source: '11',
+    sourceHandle: 'video-output',
     target: '9',
-    targetHandle: 'obj-input',
-    type: 'default',
+    targetHandle: 'video-input',
+    type: 'workflow',
     animated: false,
-    style: { stroke: '#7a4a55', strokeWidth: 2, strokeDasharray: '5 3' },
+    style: { stroke: '#5f8f74', strokeWidth: 2, strokeDasharray: '5 3' },
   },
 ];
 

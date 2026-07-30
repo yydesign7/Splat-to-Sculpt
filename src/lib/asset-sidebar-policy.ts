@@ -8,7 +8,7 @@ export type AssetListFields = {
 
 /**
  * Assets tab policy: only user uploads (video, PLY), workflow render videos,
- * Gaussian splat PLY outputs, and terminal mesh-generation GLB outputs (enforced at write time; this
+ * Gaussian splat PLY outputs, and Mesh Gen GLB/OBJ/FBX outputs (enforced at write time; this
  * filters legacy rows that may still exist in assets.json).
  */
 export function isListedSidebarAsset(entry: AssetListFields): boolean {
@@ -26,11 +26,14 @@ export function isListedSidebarAsset(entry: AssetListFields): boolean {
     return sourceNode === 'gaussianSplat' && (ft === 'splat-ply' || ft === 'ply' || urlLower.endsWith('.ply'));
   }
   if (assetType === 'render-video') {
-    return sourceNode === 'videoPreview';
+    return sourceNode === 'videoPreview' || sourceNode === 'comfyVideo';
   }
   if (assetType === 'model') {
     if (sourceNode !== 'modelGeneration') return false;
-    return ft === 'glb' || urlLower.endsWith('.glb');
+    return (
+      ft === 'glb' || ft === 'obj' || ft === 'fbx' ||
+      urlLower.endsWith('.glb') || urlLower.endsWith('.obj') || urlLower.endsWith('.fbx')
+    );
   }
   return false;
 }

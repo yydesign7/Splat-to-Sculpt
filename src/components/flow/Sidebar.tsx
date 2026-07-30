@@ -26,10 +26,12 @@ import {
   Orbit,
   Brush,
   Eraser,
+  Sparkles,
 } from 'lucide-react';
 import { getNodeVisualTheme, NODE_TYPE_CONFIGS } from '@/lib/node-config';
 import { isListedSidebarAsset } from '@/lib/asset-sidebar-policy';
 import { buildAssetDownloadFilename, downloadAssetFile } from '@/lib/asset-download';
+import { getAssetVisualPreview } from '@/lib/asset-preview';
 import { DynamicPreviewImage } from './DynamicPreviewImage';
 
 interface SidebarProps {
@@ -70,6 +72,7 @@ const NODE_ICONS: Record<string, React.ReactNode> = {
   gaussianSplat: <Orbit size={17} />,
   material: <Palette size={17} />,
   modelOrganize: <Eraser size={17} />,
+  comfyVideo: <Sparkles size={17} />,
   videoPreview: <MonitorPlay size={17} />,
   modelSurface: <Brush size={17} />,
   modelGeneration: <Box size={17} />,
@@ -87,8 +90,8 @@ const ASSET_TYPE_ICONS: Record<AssetType, React.ReactNode> = {
 
 function AssetVisual({ item }: { item: AssetEntry }) {
   const [previewRect, setPreviewRect] = useState<DOMRect | null>(null);
-  const hasPreview = Boolean(item.thumbnailUrl);
-  const isVideoPreview = item.assetType === 'video' || item.assetType === 'render-video';
+  const preview = getAssetVisualPreview(item);
+  const hasPreview = Boolean(preview.hoverPreviewUrl);
   const previewTop = previewRect
     ? Math.min(
         Math.max(previewRect.top + previewRect.height / 2, 96),
@@ -101,14 +104,24 @@ function AssetVisual({ item }: { item: AssetEntry }) {
     setPreviewRect(target.getBoundingClientRect());
   };
 
-  const smallVisual = item.thumbnailUrl ? (
+  const smallVisual = preview.smallPreviewUrl && preview.smallPreviewKind === 'image' ? (
     <span className="flex h-6 w-9 shrink-0 overflow-hidden rounded border border-zinc-700/70 bg-zinc-950">
       <DynamicPreviewImage
-        src={item.thumbnailUrl}
+        src={preview.smallPreviewUrl}
         alt=""
         className="h-full w-full object-cover"
         loading="lazy"
         draggable={false}
+      />
+    </span>
+  ) : preview.smallPreviewUrl && preview.smallPreviewKind === 'video' ? (
+    <span className="flex h-6 w-9 shrink-0 overflow-hidden rounded border border-zinc-700/70 bg-zinc-950">
+      <video
+        src={`${preview.smallPreviewUrl}#t=0.6`}
+        muted
+        playsInline
+        preload="metadata"
+        className="h-full w-full object-cover"
       />
     </span>
   ) : (
@@ -126,7 +139,7 @@ function AssetVisual({ item }: { item: AssetEntry }) {
       onBlur={() => setPreviewRect(null)}
     >
       {smallVisual}
-      {previewRect && item.thumbnailUrl && (
+      {previewRect && preview.hoverPreviewUrl && (
         <span
           className="pointer-events-none fixed z-[80] rounded-lg border border-zinc-700 bg-zinc-950/95 p-1.5 shadow-2xl shadow-black/50"
           style={{
@@ -135,22 +148,22 @@ function AssetVisual({ item }: { item: AssetEntry }) {
             transform: 'translateY(-50%)',
           }}
         >
-          {isVideoPreview ? (
+          {preview.hoverPreviewKind === 'video' ? (
             <video
-              src={`${item.fileUrl}#t=0.6`}
+              src={`${preview.hoverPreviewUrl}#t=0.6`}
               muted
               playsInline
               preload="metadata"
               className="block max-h-[150px] max-w-[220px] rounded bg-zinc-950 object-contain"
             />
-          ) : (
+          ) : preview.hoverPreviewKind === 'image' ? (
             <DynamicPreviewImage
-              src={item.thumbnailUrl}
+              src={preview.hoverPreviewUrl}
               alt=""
               className="block h-32 w-48 rounded bg-zinc-950 object-contain"
               draggable={false}
             />
-          )}
+          ) : null}
         </span>
       )}
     </span>
@@ -559,12 +572,10 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
                       group.items.map((item) => (
                         <div
                           key={item.id}
-                          draggable={item.assetType !== 'render-video'}
+                          draggable
                           onDragStart={(e) => onAssetDragStart(e, item)}
-                          className={`group flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px] transition-colors hover:bg-zinc-800 ${
-                            item.assetType !== 'render-video' ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
-                          }`}
-                          title={item.assetType !== 'render-video' ? 'Drag onto canvas node to fill in' : undefined}
+                          className="group flex cursor-grab items-center gap-2 rounded-md px-1.5 py-1 text-[13px] transition-colors hover:bg-zinc-800 active:cursor-grabbing"
+                          title="Drag onto canvas node to fill in"
                         >
                           <AssetVisual item={item} />
                           <div className="flex-1 min-w-0">

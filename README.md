@@ -2,24 +2,47 @@
 
 [中文](README.zh-CN.md) | English
 
-Splat to Sculpt is a visual workflow application for turning captured media into 3D assets. It uses a node-based canvas to connect video upload, frame extraction, Gaussian Splat generation, mesh conversion, model cleanup, surface processing, asset management, and video preview/export steps.
+Splat to Sculpt is a local-first, node-based web workflow for turning captured video or point-cloud input into editable 3D assets and presentation videos. It connects frame extraction, COLMAP reconstruction, Gaussian Splat generation, mesh conversion, Blender processing, asset management, ComfyUI video generation, and preview/export tools in one browser canvas.
 
-The project is built with Next.js 16, React, shadcn/ui, React Flow, and Three.js. Server-side scripts handle Gaussian Splat generation, PLY/GLB conversion, thumbnail rendering, model processing, and rotation video generation.
+The project is built with Next.js 16, React 19, TypeScript, React Flow, Three.js, shadcn/ui, and Python processing scripts. Heavy reconstruction and rendering work is run locally through FFmpeg, COLMAP, Blender, Python, and optionally ComfyUI.
 
-## Features
+## Current Workflow
 
-- Node-based workflow editor for 3D generation pipelines
-- Video upload with configurable frame extraction
-- Gaussian Splat generation with automatic device detection for CUDA, MPS, and CPU paths
-- Optional true-training path for 3DGS-compatible splat PLY output
-- Mesh generation from splat/PLY input for downstream GLB workflows
-- Model cleanup, surface processing, asset library, and model history
-- Preview support for video, PLY/splat, and GLB/model assets
-- Asset thumbnails for easier file recognition in the sidebar
-- Workflow library with protected preset workflows
-- Run/stop controls with task cancellation for long-running backend processes
+The built-in default workflow is:
+
+```text
+Video Upload
+  -> Frame Extraction
+  -> Gaussian Splat Gen
+  -> Mesh Gen
+  -> Model Cleanup
+  -> Surface Processing
+  -> ComfyUI Video Gen
+  -> Video Preview
+```
+
+Users can also drag assets from the sidebar into compatible nodes, save custom workflows, stop long-running tasks, clear previews, and reuse generated models or videos from the Assets panel.
+
+## Main Features
+
+- Node-based visual workflow editor with clickable, removable connections.
+- Video upload with frame extraction through FFmpeg.
+- COLMAP sparse reconstruction, dense matching, stereo fusion, and foreground mask support for point-cloud generation.
+- Gaussian Splat generation with automatic CUDA / MPS / CPU route selection and optional true-training mode.
+- Direct PLY upload support for fast initializer workflows.
+- Mesh Gen conversion from PLY/splat/model input to downstream model formats.
+- Mesh-level `geometry_graph_surface` segmentation after reconstruction, capped to practical layer counts.
+- Per-layer GLB output for editing, plus merged layered GLB publishing to Assets.
+- Model Cleanup and Surface Processing through local Blender.
+- ComfyUI Video Gen integration for model-to-multiview-to-video workflows.
+- Seedance ComfyUI pack detection and install helper for required custom nodes/workflows.
+- Assets sidebar for uploaded videos, splats, Mesh Gen models, merged layered GLBs, and rendered videos.
+- Model and video thumbnail generation for easier browsing.
+- Session-based temporary file storage with automatic cleanup.
 
 ## Quick Start
+
+This project uses `pnpm`. Do not use `npm` or `yarn`.
 
 Install dependencies:
 
@@ -27,7 +50,7 @@ Install dependencies:
 pnpm install
 ```
 
-Install Python processing dependencies when you need the 3D generation scripts:
+Install Python processing dependencies when you need reconstruction, mesh, thumbnail, or video scripts:
 
 ```bash
 pnpm python-deps
@@ -39,19 +62,93 @@ Start the development server:
 pnpm dev
 ```
 
-Open [http://localhost:5001](http://localhost:5001) in your browser.
+Open [http://localhost:5001](http://localhost:5001).
 
-Build the production version:
+Build and run the production server:
 
 ```bash
 pnpm build
-```
-
-Start the production server:
-
-```bash
 pnpm start
 ```
+
+## Local Tool Requirements
+
+Basic UI work can run with Node.js and pnpm only. The full reconstruction workflow also depends on local tools:
+
+- FFmpeg: video probing and frame extraction.
+- COLMAP: camera poses, sparse reconstruction, dense matching, and stereo fusion.
+- Python packages listed in `scripts/requirements-python.txt`.
+- Blender: model cleanup, material/surface processing, previews, and rotation-video rendering.
+- ComfyUI: optional final video generation through the ComfyUI API.
+
+The development script tries to use the configured Python environment and local tool paths when available. You can override paths with environment variables such as:
+
+```bash
+PYTHON_BIN=/path/to/python
+NS_TRAIN_BIN=/path/to/ns-train
+NS_EXPORT_BIN=/path/to/ns-export
+COMFYUI_BASE_URL=http://127.0.0.1:8000
+COMFYUI_3D_INPUT_DIR=/path/to/ComfyUI/input/3d
+```
+
+## ComfyUI Integration
+
+The ComfyUI Video Gen node talks to a local ComfyUI server, defaulting to:
+
+```text
+http://127.0.0.1:8000
+```
+
+At runtime the backend:
+
+1. Checks whether ComfyUI is online.
+2. Detects ComfyUI input, output, `input/3d`, custom node, and workflow directories from `/system_stats`.
+3. Copies the final model into ComfyUI `input/3d`.
+4. Builds a prompt from the bundled API workflow preset.
+5. Submits the prompt through `/prompt`.
+6. Polls `/history/{prompt_id}`.
+7. Downloads the generated video through `/view`.
+8. Returns the video to the web page and publishes it to Assets.
+
+The project includes a Seedance deployment package under:
+
+```text
+vendor/comfyui/seedance2/
+```
+
+It contains the required custom nodes and workflow files used by the ComfyUI Video Gen preset. The app can check whether the pack is installed and copy the files into the detected ComfyUI folders.
+
+## Blender Integration
+
+Blender is called locally in background mode for:
+
+- Model Cleanup.
+- Surface Processing material and light output.
+- Layer-aware model processing.
+- Static preview rendering.
+- Rotation video rendering when Video Preview receives a model.
+
+If Blender is missing, Blender-dependent nodes show a clear error while earlier workflow steps remain usable.
+
+## Assets And Temporary Files
+
+The app separates temporary workflow files from reusable assets:
+
+- Temporary session files are written to `.data/ephemeral/{sessionId}/`.
+- Published assets are copied to `public/asset-published/{assetId}/`.
+- Asset metadata is stored in `public/asset-library/assets.json`.
+
+Sidebar Assets show reusable files only, such as uploaded videos, Gaussian splat PLY files, Mesh Gen model outputs, merged layered GLBs, ComfyUI videos, and rotation videos. Intermediate frames, masks, COLMAP workspaces, raw layer GLBs, and metadata files stay temporary.
+
+Cleanup behaviour:
+
+- On backend startup, session folders older than 3 days are removed.
+- On normal backend exit, `.data/ephemeral` is cleared.
+- Published Assets are not deleted by ephemeral cleanup.
+
+## Mesh And Layer Publishing
+
+Mesh Gen registers generated `glb`, `obj`, and `fbx` model outputs to Assets. When Mesh Gen produces `layerGlbUrls`, the app first merges the layer GLBs into one `merged.glb` with layer names preserved as internal nodes/objects, then publishes that single layered GLB to Assets. Individual layer GLBs remain temporary and are used for Surface Processing.
 
 ## Useful Scripts
 
@@ -78,23 +175,26 @@ scripts/
 ├── generate_gaussian_splat.py
 ├── train_gaussian_splat.py
 ├── gs_to_mesh.py
+├── merge_glbs.py
 ├── render_ply_thumbnail.py
-└── other model/video processing scripts
+├── render_model_thumbnail.py
+└── other model/video/reconstruction scripts
+
+vendor/
+└── comfyui/seedance2/   # Optional ComfyUI Seedance deployment pack
 
 public/
-├── asset-library/       # Lightweight asset library metadata
-└── model-history/       # Lightweight model history metadata
+├── asset-library/       # Lightweight asset metadata
+├── model-history/       # Lightweight model history metadata
+└── workflow-library/    # Saved workflow metadata
 ```
 
 ## Generated Files
 
-Runtime assets are intentionally excluded from Git. Generated videos, frames, PLY files, GLB files, textures, COLMAP scenes, Blender outputs, local environments, and temporary `.data/` files should stay local.
-
-Ignored runtime paths include:
+Runtime assets and local generated output should stay out of Git. Ignored paths include:
 
 ```text
 .data/
-scripts/.mamba-root/
 public/asset-published/
 public/videos/
 public/frames/
@@ -103,21 +203,23 @@ public/blender-output/
 public/obj-processed/
 public/rotation-videos/
 public/textures/
+scripts/.mamba-root/
 ```
 
-Large test assets should be distributed through GitHub Releases, cloud storage, or dataset hosting instead of the source repository.
+Fresh clones start with empty local Assets and model history. Large demo assets should be distributed through Releases, cloud storage, or dataset hosting instead of the source repository.
 
-## Technology Stack
+## Validation
 
-- Next.js 16 and React 19
-- TypeScript
-- React Flow
-- Three.js, React Three Fiber, and Drei
-- shadcn/ui and Radix UI
-- Tailwind CSS v4
-- Python processing scripts for Gaussian Splat, mesh, thumbnail, and video tasks
-- pnpm for package management
+Common checks:
 
-## Notes
+```bash
+pnpm ts-check
+pnpm lint
+```
 
-This repository contains the application source code and processing scripts. Local generated assets and machine-specific environments are not committed, so a fresh clone starts with an empty asset library and model history.
+Feature-specific tests can be run with `tsx`, for example:
+
+```bash
+pnpm exec tsx --test src/lib/mesh-asset-publish-policy.test.ts
+pnpm exec tsx --test src/lib/ephemeral-cleanup.test.ts
+```

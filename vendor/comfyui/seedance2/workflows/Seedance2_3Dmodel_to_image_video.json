@@ -1,0 +1,162 @@
+{
+  "id": "seedance2-3d-nine-view-integrated-20260724",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 12,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "Seedance3DModelMultiView",
+      "pos": [450, 80],
+      "size": [450, 530],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "SEEDANCE_3D_MODEL", "link": 12},
+        {"name": "scene_selection", "type": "COMBO", "widget": {"name": "scene_selection"}, "link": null},
+        {"name": "resolution", "type": "COMBO", "widget": {"name": "resolution"}, "link": null},
+        {"name": "background", "type": "COMBO", "widget": {"name": "background"}, "link": null},
+        {"name": "camera_elevation", "type": "FLOAT", "widget": {"name": "camera_elevation"}, "link": null},
+        {"name": "frame_padding", "type": "FLOAT", "widget": {"name": "frame_padding"}, "link": null},
+        {"name": "render_engine", "type": "COMBO", "widget": {"name": "render_engine"}, "link": null},
+        {"name": "force_render", "type": "BOOLEAN", "widget": {"name": "force_render"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "全部角度（批次）", "type": "IMAGE", "links": [10]},
+        {"name": "正面", "type": "IMAGE", "links": [1]},
+        {"name": "右前45°", "type": "IMAGE", "links": [2]},
+        {"name": "右侧", "type": "IMAGE", "links": [3]},
+        {"name": "右后45°", "type": "IMAGE", "links": [4]},
+        {"name": "背面", "type": "IMAGE", "links": [5]},
+        {"name": "左后45°", "type": "IMAGE", "links": [6]},
+        {"name": "左侧", "type": "IMAGE", "links": [7]},
+        {"name": "左前45°", "type": "IMAGE", "links": [8]},
+        {"name": "高位英雄角度", "type": "IMAGE", "links": [9]},
+        {"name": "图片文件夹", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "Seedance3DModelMultiView"},
+      "widgets_values": ["场景全部对象", 1024, "深灰影棚", 12.0, 1.25, "Eevee（快速）", false],
+      "color": "#25364a",
+      "bgcolor": "#314c69"
+    },
+    {
+      "id": 2,
+      "type": "ByteDance2ReferenceNode",
+      "pos": [980, 40],
+      "size": [650, 760],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "model"}, "link": null},
+        {"name": "model.prompt", "type": "STRING", "widget": {"name": "model.prompt"}, "link": null},
+        {"name": "model.resolution", "type": "COMBO", "widget": {"name": "model.resolution"}, "link": null},
+        {"name": "model.ratio", "type": "COMBO", "widget": {"name": "model.ratio"}, "link": null},
+        {"name": "model.duration", "type": "INT", "widget": {"name": "model.duration"}, "link": null},
+        {"name": "model.generate_audio", "type": "BOOLEAN", "widget": {"name": "model.generate_audio"}, "link": null},
+        {"label": "image_1", "name": "model.reference_images.image_1", "shape": 7, "type": "IMAGE", "link": 1},
+        {"label": "image_2", "name": "model.reference_images.image_2", "shape": 7, "type": "IMAGE", "link": 2},
+        {"label": "image_3", "name": "model.reference_images.image_3", "shape": 7, "type": "IMAGE", "link": 3},
+        {"label": "image_4", "name": "model.reference_images.image_4", "shape": 7, "type": "IMAGE", "link": 4},
+        {"label": "image_5", "name": "model.reference_images.image_5", "shape": 7, "type": "IMAGE", "link": 5},
+        {"label": "image_6", "name": "model.reference_images.image_6", "shape": 7, "type": "IMAGE", "link": 6},
+        {"label": "image_7", "name": "model.reference_images.image_7", "shape": 7, "type": "IMAGE", "link": 7},
+        {"label": "image_8", "name": "model.reference_images.image_8", "shape": 7, "type": "IMAGE", "link": 8},
+        {"label": "image_9", "name": "model.reference_images.image_9", "shape": 7, "type": "IMAGE", "link": 9},
+        {"label": "video_1", "name": "model.reference_videos.video_1", "shape": 7, "type": "VIDEO", "link": null},
+        {"label": "audio_1", "name": "model.reference_audios.audio_1", "shape": 7, "type": "AUDIO", "link": null},
+        {"label": "asset_1", "name": "model.reference_assets.asset_1", "shape": 7, "type": "STRING", "link": null},
+        {"name": "model.auto_downscale", "shape": 7, "type": "BOOLEAN", "widget": {"name": "model.auto_downscale"}, "link": null},
+        {"name": "model.auto_upscale", "shape": 7, "type": "BOOLEAN", "widget": {"name": "model.auto_upscale"}, "link": null},
+        {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
+        {"name": "watermark", "type": "BOOLEAN", "widget": {"name": "watermark"}, "link": null}
+      ],
+      "outputs": [{"name": "VIDEO", "type": "VIDEO", "links": [11]}],
+      "properties": {"Node name for S&R": "ByteDance2ReferenceNode"},
+      "widgets_values": [
+        "Seedance 2.0",
+        "图片1至图片9是同一枚首饰从不同角度渲染的严格结构参考。必须保持戒圈轮廓、镶爪数量、主石形状、辅石数量、金属颜色、比例和所有设计细节完全一致，不要混合角度，不要增加或删除部件。高端珠宝商业广告，深色影棚，电影级布光，真实微距摄影。镜头从正面英雄角度缓慢推进，产品在展台上平稳旋转，展示侧面镶嵌结构，最后停在主石微距特写。不要文字，不要标志，不要包装盒，不要额外首饰，不要手指遮挡，不要改变产品设计。",
+        "720p",
+        "9:16",
+        10,
+        true,
+        20260724,
+        "randomize",
+        false,
+        "randomize",
+        false
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 3,
+      "type": "SaveVideo",
+      "pos": [1710, 160],
+      "size": [470, 520],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "video", "type": "VIDEO", "link": 11},
+        {"name": "filename_prefix", "type": "STRING", "widget": {"name": "filename_prefix"}, "link": null},
+        {"name": "format", "type": "COMBO", "widget": {"name": "format"}, "link": null},
+        {"name": "codec", "type": "COMBO", "widget": {"name": "codec"}, "link": null}
+      ],
+      "outputs": [{"name": "video", "type": "VIDEO", "links": null}],
+      "properties": {},
+      "widgets_values": ["Seedance_Ads/clips/3d_model_shot", "auto", "auto"]
+    },
+    {
+      "id": 4,
+      "type": "PreviewImage",
+      "pos": [460, 690],
+      "size": [440, 520],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 10}],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "Seedance3DModelLoader",
+      "pos": [30, 160],
+      "size": [350, 150],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "COMBO", "widget": {"name": "model"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "3D模型", "type": "SEEDANCE_3D_MODEL", "links": [12]}
+      ],
+      "properties": {"Node name for S&R": "Seedance3DModelLoader"},
+      "widgets_values": ["ring_ai_ref2.fbx"],
+      "color": "#263b36",
+      "bgcolor": "#34594e"
+    }
+  ],
+  "links": [
+    [1, 1, 1, 2, 6, "IMAGE"],
+    [2, 1, 2, 2, 7, "IMAGE"],
+    [3, 1, 3, 2, 8, "IMAGE"],
+    [4, 1, 4, 2, 9, "IMAGE"],
+    [5, 1, 5, 2, 10, "IMAGE"],
+    [6, 1, 6, 2, 11, "IMAGE"],
+    [7, 1, 7, 2, 12, "IMAGE"],
+    [8, 1, 8, 2, 13, "IMAGE"],
+    [9, 1, 9, 2, 14, "IMAGE"],
+    [10, 1, 0, 4, 0, "IMAGE"],
+    [11, 2, 0, 3, 0, "VIDEO"],
+    [12, 5, 0, 1, 0, "SEEDANCE_3D_MODEL"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {"ds": {"scale": 0.68, "offset": [55, 45]}, "frontendVersion": "1.45.20"},
+  "version": 0.4
+}

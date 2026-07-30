@@ -44,6 +44,7 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Cache
 .cache/
+.fontconfig-cache/
 .parcel-cache/
 .eslintcache
 .stylelintcache
@@ -84,6 +85,7 @@ Desktop.ini
 # Temporary files
 *.tmp
 *.temp
+tmp/
 .tmp/
 .temp/
 
@@ -105,6 +107,7 @@ Desktop.ini
 
 # Generated workflow assets and local reconstruction outputs
 .data/
+report_assets/
 scripts/.mamba-root/
 public/asset-published/
 public/videos/
