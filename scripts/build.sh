@@ -3,8 +3,14 @@ set -Eeuo pipefail
 
 COZE_WORKSPACE_PATH="${COZE_WORKSPACE_PATH:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 
 cd "${COZE_WORKSPACE_PATH}"
+
+if [ -z "${PYTHON_BIN}" ]; then
+  echo "Python 3 is required for the full production build. Set PYTHON_BIN to a compatible interpreter."
+  exit 1
+fi
 
 # --- Optimize apt source for CN network (aliyun mirror) ---
 if grep -q "archive.ubuntu.com" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; then
@@ -31,14 +37,14 @@ fi
 
 # --- Python deps: open3d (prefer local wheel cache) ---
 echo "Checking Python dependencies..."
-if ! python3 -c "import open3d" &>/dev/null; then
+if ! "${PYTHON_BIN}" -c "import open3d" &>/dev/null; then
   PYPI_CACHE="${SCRIPT_DIR}/pypi-cache"
   if [ -d "$PYPI_CACHE" ] && ls "$PYPI_CACHE"/open3d-*.whl 1>/dev/null 2>&1; then
     echo "Installing open3d from local wheel cache (deps from PyPI if needed)..."
-    pip3 install --find-links="$PYPI_CACHE" open3d
+    "${PYTHON_BIN}" -m pip install --find-links="$PYPI_CACHE" open3d
   else
     echo "Installing open3d from PyPI (no local cache)..."
-    pip3 install --timeout 600 open3d
+    "${PYTHON_BIN}" -m pip install --timeout 600 open3d
   fi
 else
   echo "open3d: OK"
@@ -49,7 +55,9 @@ echo "Installing dependencies..."
 pnpm install --prefer-frozen-lockfile --prefer-offline --loglevel debug --reporter=append-only
 
 echo "Building the Next.js project..."
-pnpm next build
+# The development inspector relies on a custom Babel config, which requires
+# Next.js's webpack build path for reliable production compilation.
+pnpm next build --webpack
 
 echo "Bundling server with tsup..."
 pnpm tsup src/server.ts --format cjs --platform node --target node20 --outDir dist --no-splitting --no-minify

@@ -3,11 +3,30 @@ set -Eeuo pipefail
 
 COZE_WORKSPACE_PATH="${COZE_WORKSPACE_PATH:-$(pwd)}"
 PYTHON_ENV_NAME="${PYTHON_ENV_NAME:-studio3dgs}"
-PYTHON_BIN="${PYTHON_BIN:-/Users/yuyi/miniconda3/envs/studio3dgs/bin/python3}"
-NS_TRAIN_BIN="${NS_TRAIN_BIN:-/Users/yuyi/miniconda3/envs/studio3dgs/bin/ns-train}"
-NS_EXPORT_BIN="${NS_EXPORT_BIN:-/Users/yuyi/miniconda3/envs/studio3dgs/bin/ns-export}"
-MPLCONFIGDIR="${MPLCONFIGDIR:-/private/tmp/studio3dgs-matplotlib}"
-XDG_CACHE_HOME="${XDG_CACHE_HOME:-/private/tmp/studio3dgs-cache}"
+PYTHON_ENV_BIN=""
+
+if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+    if [ -n "${CONDA_BASE}" ] && [ -d "${CONDA_BASE}/envs/${PYTHON_ENV_NAME}/bin" ]; then
+        PYTHON_ENV_BIN="${CONDA_BASE}/envs/${PYTHON_ENV_NAME}/bin"
+        export PATH="${PYTHON_ENV_BIN}:${PATH}"
+        echo "Using Python environment: ${PYTHON_ENV_NAME}"
+    fi
+fi
+
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if [ -n "${PYTHON_ENV_BIN}" ] && [ -x "${PYTHON_ENV_BIN}/python3" ]; then
+        PYTHON_BIN="${PYTHON_ENV_BIN}/python3"
+    else
+        PYTHON_BIN="$(command -v python3 || printf 'python3')"
+    fi
+fi
+
+PYTHON_BIN_DIR="$(dirname "${PYTHON_BIN}")"
+NS_TRAIN_BIN="${NS_TRAIN_BIN:-$(command -v ns-train || printf '%s/ns-train' "${PYTHON_BIN_DIR}")}"
+NS_EXPORT_BIN="${NS_EXPORT_BIN:-$(command -v ns-export || printf '%s/ns-export' "${PYTHON_BIN_DIR}")}"
+MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/studio3dgs-matplotlib}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-${TMPDIR:-/tmp}/studio3dgs-cache}"
 
 export PYTHON_BIN
 export NS_TRAIN_BIN
@@ -21,13 +40,6 @@ DEPLOY_RUN_PORT="${DEPLOY_RUN_PORT:-$PORT}"
 
 start_service() {
     cd "${COZE_WORKSPACE_PATH}"
-    if command -v conda >/dev/null 2>&1; then
-        CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-        if [ -n "${CONDA_BASE}" ] && [ -d "${CONDA_BASE}/envs/${PYTHON_ENV_NAME}/bin" ]; then
-            export PATH="${CONDA_BASE}/envs/${PYTHON_ENV_NAME}/bin:${PATH}"
-            echo "Using Python environment: ${PYTHON_ENV_NAME}"
-        fi
-    fi
     echo "Starting HTTP service on port ${DEPLOY_RUN_PORT} for deploy..."
     PORT=${DEPLOY_RUN_PORT} node dist/server.js
 }

@@ -44,6 +44,24 @@ Users can also drag assets from the sidebar into compatible nodes, save custom w
 
 This project uses `pnpm`. Do not use `npm` or `yarn`.
 
+Run the guided setup checker for your platform. It installs the locked pnpm dependencies, reports missing local tools, and leaves large external applications and AI models under your control.
+
+macOS:
+
+```bash
+bash scripts/setup-macos.sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+```
+
+Add `--install-python` on macOS or `-InstallPython` on Windows to install the Python processing packages. Add `--check-only` or `-CheckOnly` to perform diagnostics without installing project dependencies.
+
+Manual setup remains available:
+
 Install dependencies:
 
 ```bash
@@ -172,6 +190,8 @@ src/
 └── hooks/               # Shared React hooks
 
 scripts/
+├── setup-macos.sh
+├── setup-windows.ps1
 ├── generate_gaussian_splat.py
 ├── train_gaussian_splat.py
 ├── gs_to_mesh.py
@@ -198,6 +218,7 @@ Runtime assets and local generated output should stay out of Git. Ignored paths 
 public/asset-published/
 public/videos/
 public/frames/
+public/uploads/
 public/colmap-scenes/
 public/blender-output/
 public/obj-processed/

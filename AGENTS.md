@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-Splat to Sculpt 是一个基于节点式画布的 3D 内容生成工作流应用。用户可以通过拖拽节点构建从视频上传、帧提取、Gaussian Splat 生成、Mesh 转换、模型清理、表面处理到视频预览的完整流程，也可以使用 Material Gen、Sticky Note 等辅助节点。点击右上角 Run 后，工作流只沿已连接的节点传递数据；处理完成的节点会把对应文件输出推送到下游，末端节点完成后工作流会自动停止。
+Splat to Sculpt 是一个基于节点式画布的 3D 内容生成工作流应用。用户可以通过拖拽节点构建从视频上传、帧提取、Gaussian Splat 生成、Mesh 转换、模型清理、表面处理、ComfyUI 视频生成到视频预览的完整流程，也可以使用 Sticky Note 等辅助节点。Material Gen 仍为旧工作流保留，但生成 API 当前已禁用。点击右上角 Run 后，工作流只沿已连接的节点传递数据；处理完成的节点会把对应文件输出推送到下游，末端节点完成后工作流会自动停止。
 
 ### 版本技术栈
 
@@ -63,12 +63,13 @@ Splat to Sculpt 是一个基于节点式画布的 3D 内容生成工作流应用
 5. **节点触发条件**：
    - **Video Upload**：用户手动上传视频，上传完成后输出 `videoServerPath`，同时保存目标帧数
    - **Frame Extraction**：`workflowRunning && videoServerPath` → 自动提取帧，输出 `frames`
-   - **Gaussian Splat Gen**：接收 `frames` 或手动/上游 PLY；可根据设备走 CUDA/NerfStudio、MPS/CPU 快速 splat PLY 或 true-training 路径；输出 `splatUrl`，并保留 `sourcePlyUrl` 作为 mesh-output
-   - **Material Gen**：`workflowRunning && textInput` → 调用 `/api/generate-texture` 生成 texture PNG
-   - **Mesh Gen**：`workflowRunning && modelUrl` → 接收 splat/PLY/OBJ/GLB，转换或处理为下游可用的 GLB/OBJ/PLY 输出；PNG texture 仅在有连接时作为可选输入
+   - **Gaussian Splat Gen**：接收 `frames` 或手动/上游 PLY；根据输入和设备走 True training 或 Fast Initializer。True training 输出 `splatUrl`，Fast Initializer/直接 PLY 输出 `sourcePlyUrl`，节点会让已有下游连线跟随当前模式切换输出句柄
+   - **Material Gen**：为旧工作流兼容保留；`/api/generate-texture` 当前固定返回 `MATERIAL_GEN_DISABLED`，不在 Default Workflow 中
+   - **Mesh Gen**：`workflowRunning && modelUrl` → 接收 splat/PLY/OBJ/GLB，转换或处理为下游可用的 GLB/OBJ/PLY；PLY/splat 重建后执行 `geometry_graph_surface` mesh face 分层，最多输出 8 个几何层；PNG texture 仅在有连接时作为可选输入
    - **Model Cleanup**：`workflowRunning && modelUrl && 有上游连接` → 自动调用 Blender 清理/整理模型
    - **Surface Processing**：`workflowRunning && modelUrl && 有上游连接` → 接收模型后可调材质/灯光并自动或手动调用 Blender 材质处理
-   - **Video Preview**：`workflowRunning && modelUrl && 有上游连接` → 自动调用旋转视频 API 生成 360° 预览视频
+   - **ComfyUI Video Gen**：`workflowRunning && modelUrl && 有上游连接` → 把模型复制到自动检测到的本机 ComfyUI `input/3d`，提交内置 API workflow，轮询任务并下载输出视频
+   - **Video Preview**：默认接收 ComfyUI 的 `videoUrl` 并直接播放；接收模型输入时仍可调用旋转视频 API 生成 360° 预览视频
 
 ### 端口映射
 
@@ -83,6 +84,7 @@ SOURCE_HANDLE_MAP = {
   'modelOrganize.obj-output': 'outputUrl',
   'modelSurface.obj-output': 'outputModelUrl',
   'modelGeneration.output': 'outputUrl',
+  'comfyVideo.video-output': 'videoUrl',
 }
 
 // Target handles → input data update function
@@ -97,31 +99,30 @@ TARGET_HANDLE_MAP = {
   'modelOrganize.obj-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward layerFiles/layerNames/layerGlbUrls; return result; },
   'modelSurface.obj-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward layerFiles/layerNames/layerGlbUrls; return result; },
   'videoPreview.obj-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward lightParams; return result; },
+  'videoPreview.video-input': (value) => ({ videoUrl: value }),
+  'comfyVideo.model-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward lightParams; return result; },
 }
 ```
 
 ### 节点系统
-9 种预设节点，默认工作流拓扑：
+节点库提供 10 种节点类型；Default Workflow 使用 8 个处理/输出节点和 3 个 Sticky Note：
 
 ```text
 Sticky Note             Sticky Note        Sticky Note
 
-Video Upload → Frame Extraction → Gaussian Splat Gen → Mesh Gen → Model Cleanup → Surface Processing → Mesh Gen
-                                                                                         ↓
-                                                                                  Video Preview
-
-[Material Gen]（独立放置在 Surface Processing 上方，按需连接 texture 输出）
+Video Upload → Frame Extraction → Gaussian Splat Gen → Mesh Gen → Model Cleanup → Surface Processing → ComfyUI Video Gen → Video Preview
 ```
 
 1. **Video Upload** - 上传视频、显示封面预览、设置 frame count；输出 `videoServerPath` 给 Frame Extraction
 2. **Frame Extraction** - 按目标帧数提取图片帧，显示输出文件夹和帧数量；输出 `frames`
-3. **Gaussian Splat Gen** - 接收 image frames 或直接上传/接收 PLY；显示设备类型、目标 PLY 类型、训练步数和真实进度；支持 auto / true-training 路径；输出 `splat-output` 给 Mesh Gen，并保留 `mesh-output` 兼容 PLY 源
-4. **Mesh Gen** - 接收 splat/PLY/OBJ/GLB，转换或整理为 GLB/OBJ/PLY 输出；接收到 splat PLY 时负责转换成后续节点可处理的 GLB/model 文件
+3. **Gaussian Splat Gen** - 接收 image frames 或直接上传/接收 PLY；显示设备类型、目标 PLY 类型、训练步数和真实进度；支持 auto / True training / Fast Initializer 路径，并按运行模式切换 `splat-output` 或 `mesh-output`
+4. **Mesh Gen** - 接收 splat/PLY/OBJ/GLB，重建或整理为 GLB/OBJ/PLY；PLY/splat mesh 生成后执行 `geometry_graph_surface`，输出主模型、最多 8 个 layer GLB 和分层 metadata
 5. **Model Cleanup** - 接收上游模型文件，调用 Blender 清理/整理模型，并透传 layerFiles/layerNames/layerGlbUrls
 6. **Surface Processing** - 预览模型，按层调整材质参数和灯光参数；材质/颜色变化会写入 Blender 输出，并把 lightParams 与层信息传到下游
-7. **Mesh Gen（第二个）** - 接收表面处理后的模型，生成最终可下载/可预览的模型输出，并继续推送给 Video Preview
-8. **Video Preview** - 接收模型文件，调用旋转视频 API 生成 360° 视频并预览播放
-9. **Sticky Note** - 注释节点，只记录想法或流程说明，不参与运行和数据传输
+7. **ComfyUI Video Gen** - 接收 Surface Processing 输出模型，检测本机 ComfyUI 和 Seedance pack，提交 API workflow，并把生成视频传给 Video Preview
+8. **Video Preview** - 接收视频时直接播放；接收模型时可调用旋转视频 API 生成 360° 视频
+9. **Material Gen** - 旧工作流兼容节点，可手动添加，但生成 API 当前禁用且不在 Default Workflow 中
+10. **Sticky Note** - 注释节点，只记录想法或流程说明，不参与运行和数据传输
 
 ### Mesh Gen 输入规则
 - **Model handle**（必填）：接收 splat、PLY、OBJ 或 GLB，通过 `modelUrl` + `inputType` 字段存储
@@ -132,27 +133,29 @@ Video Upload → Frame Extraction → Gaussian Splat Gen → Mesh Gen → Model 
 - **普通模型输入**：非 splat 输入会根据 URL 后缀推断 `ply` / `obj` / `glb`，并沿用对应处理路径
 
 ### 灯光参数传递链
-灯光参数（`LightParams`）从 Surface Processing 节点产生，随模型数据推送到下游：
+灯光参数（`LightParams`）从 Surface Processing 节点产生。其实际用途取决于下游路径：
 
 ```text
-Surface Processing → Mesh Gen（第二个） → Video Preview
+Surface Processing → Video Preview（直接模型路径，生成 360° rotation video）
+Surface Processing → ComfyUI Video Gen → Video Preview（Default Workflow，播放 ComfyUI 成片）
 ```
 
 - **LightParams 接口**：`ambientIntensity`、`mainLightIntensity`、`mainLightColor`、`mainLightAzimuth`、`mainLightElevation`、`fillLightIntensity`、`fillLightAzimuth`、`fillLightElevation`、`exposure`
 - **前端预览**：ModelViewer / InteractiveModelViewer 接收 `lightParams` 并实时更新 Three.js 场景灯光
 - **Blender 渲染**：`blender_material.py` 接收灯光参数控制场景灯光和材质输出
-- **视频生成**：`generate_rotation_video.py` / rotation video API 使用灯光参数控制渲染效果
+- **视频生成**：模型直接连接 Video Preview 时，`generate_rotation_video.py` / rotation video API 使用灯光参数控制渲染效果；ComfyUI 节点虽然接收模型元数据，但 Default Workflow 的成片外观由 ComfyUI 内置 workflow preset 控制
 
 ### 分层信息传递链
-Gaussian Splat 或上游 PLY 可能携带层信息（`layerFiles` + `layerNames` + `layerGlbUrls`），这些信息会沿模型处理链透传：
+当前分层职责位于 Mesh Gen。PLY/splat 完成网格重建后，`geometry_graph_surface` 根据 face adjacency、法线角度和连通区域生成最多 8 个 layer GLB；这些信息沿后续模型处理链透传：
 
 ```text
-Gaussian Splat Gen / PLY source → Mesh Gen → Model Cleanup → Surface Processing → Mesh Gen
+Gaussian Splat Gen / PLY source → Mesh Gen → Model Cleanup → Surface Processing
 ```
 
-- **layerFiles**: 各层 PLY 文件的公共路径数组
+- **layerFiles**: 旧工作流兼容的分层 PLY 路径；Gaussian Auto Layers 已移除，当前流程不再依赖它生成新分层
 - **layerNames**: 各层名称数组
 - **layerGlbUrls**: 各层转换后的 GLB 路径数组
+- **Assets 发布**: Mesh Gen 会把多个 layer GLB 合并成保留内部层节点/对象名称的 `merged.glb` 后登记到 Assets；独立 layer GLB 保持为临时处理文件
 - **前端显示**: Surface Processing 通过层名标签和 layer metadata 帮助用户选择层级
 - **层选择映射**: InteractiveModelViewer 优先使用 metadata 层名；必要时回退到 mesh 名称或颜色检测
 
@@ -172,7 +175,7 @@ Gaussian Splat / PLY source
 
 ### 画布交互
 - 从左侧节点库拖拽添加节点
-- 节点间连线（smoothstep 动画边），只有有连线的节点才传输文件数据
+- 节点间连线使用可选中的自定义 edge；选中后高亮并显示删除按钮，也可按 Delete/Backspace 删除。只有有连线的节点才传输文件数据
 - 节点右上角删除按钮；可上传预览框在已有文件时显示清除 X
 - 画布缩放、平移、MiniMap、Controls；右下角 Controls 保留 fit 功能
 - 顶栏包含 Save Workflow、Clear、Run / Stop
@@ -183,7 +186,7 @@ Gaussian Splat / PLY source
 
 ### 左侧导航
 - 可折叠/展开
-- **Node Library**：按类别展示 Video Upload、Frame Extraction、Gaussian Splat Gen、Mesh Gen、Model Cleanup、Surface Processing、Material Gen、Video Preview、Sticky Note
+- **Node Library**：按类别展示 Video Upload、Frame Extraction、Gaussian Splat Gen、Mesh Gen、Model Cleanup、Surface Processing、ComfyUI Video Gen、Video Preview、Material Gen（disabled）和 Sticky Note
 - **Assets**：展示已发布/临时资产，支持视频与模型缩略图
 - **Workflows Library**：保存用户工作流，并内置不可删除的 Default Workflow
 - **Model History**：展示模型生成历史记录
@@ -207,7 +210,7 @@ Gaussian Splat / PLY source
 - 自定义节点使用 `NodeProps<T>` 泛型
 - 节点数据更新通过 `useReactFlow().setNodes`
 - Handle 的 `id` 属性用于多输入/多输出端口区分（如 Gaussian Splat 的 `splat-output` / `mesh-output`，Mesh Gen 的 `model-input` / `texture`）
-- Gaussian Splat Gen 默认使用 `splat-output` 连接到 Mesh Gen 的 `model-input`
+- Gaussian Splat Gen 与 Mesh Gen 的已有连线会按运行模式在 `splat-output`（True training）和 `mesh-output`（Fast Initializer/直接 PLY）之间自动切换
 - Mesh Gen 源端口 id 为 `output`，目标端口 id 为 `model-input` 和可选 `texture`
 
 ### 工作流开发规范

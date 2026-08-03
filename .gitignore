@@ -112,6 +112,7 @@ scripts/.mamba-root/
 public/asset-published/
 public/videos/
 public/frames/
+public/uploads/
 public/colmap-scenes/
 public/blender-output/
 public/obj-processed/

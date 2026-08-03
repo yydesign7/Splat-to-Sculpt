@@ -44,6 +44,24 @@ Video Upload
 
 项目只使用 `pnpm`，不要使用 `npm` 或 `yarn`。
 
+可以先运行对应系统的安装检查脚本。脚本会安装锁定的 pnpm 依赖、检查缺少的本地工具，但不会擅自安装大型外部应用或 AI 模型。
+
+macOS：
+
+```bash
+bash scripts/setup-macos.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+```
+
+macOS 添加 `--install-python`、Windows 添加 `-InstallPython` 可同时安装 Python 处理依赖。添加 `--check-only` 或 `-CheckOnly` 可以只检查环境，不安装项目依赖。
+
+也可以继续使用手动安装方式：
+
 安装依赖：
 
 ```bash
@@ -172,6 +190,8 @@ src/
 └── hooks/               # 共享 React hooks
 
 scripts/
+├── setup-macos.sh
+├── setup-windows.ps1
 ├── generate_gaussian_splat.py
 ├── train_gaussian_splat.py
 ├── gs_to_mesh.py
@@ -198,6 +218,7 @@ public/
 public/asset-published/
 public/videos/
 public/frames/
+public/uploads/
 public/colmap-scenes/
 public/blender-output/
 public/obj-processed/
