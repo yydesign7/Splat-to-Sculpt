@@ -1,5 +1,6 @@
 import type { Edge, Node } from '@xyflow/react';
 import { createDefaultNodeData, type WorkflowNodeType } from '@/lib/workflow/node-registry';
+import { SAVED_WORKFLOW_SCHEMA_VERSION } from '@/lib/workflow/schema';
 
 export const DEFAULT_WORKFLOW_ID = 'preset_default_workflow';
 export const DEFAULT_WORKFLOW_NAME = 'Default Workflow';
@@ -161,6 +162,7 @@ export const initialEdges: Edge[] = [
 
 export function createDefaultWorkflowEntry() {
   return {
+    schemaVersion: SAVED_WORKFLOW_SCHEMA_VERSION,
     id: DEFAULT_WORKFLOW_ID,
     name: DEFAULT_WORKFLOW_NAME,
     nodes: initialNodes,

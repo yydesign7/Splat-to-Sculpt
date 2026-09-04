@@ -48,8 +48,9 @@ import { buildClearedWorkflowGraph } from '@/lib/workflow-clear';
 import { getPreferredGaussianMeshOutputHandle } from '@/lib/gaussian-output-routing';
 import { buildAssetDropNodeUpdates } from '@/lib/asset-drop-mapping';
 import { findDropTargetNode } from '@/lib/flow-node-hit-test';
-import { sanitizeLoadedWorkflowGraph } from '@/lib/workflow-load-sanitizer';
 import { createDefaultNodeData, isWorkflowNodeType } from '@/lib/workflow/node-registry';
+import { compileWorkflowGraph } from '@/lib/workflow/graph-compiler';
+import { migrateSavedWorkflow, SAVED_WORKFLOW_SCHEMA_VERSION } from '@/lib/workflow/migrations';
 
 /* ========== Node Types Registry ========== */
 const nodeTypes: NodeTypes = {
@@ -276,6 +277,7 @@ function FlowEditorInner() {
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workflowRunning, setWorkflowRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
   const [ephemeralSessionId, setEphemeralSessionId] = useState<string | null>(null);
   const [canvasRevision, setCanvasRevision] = useState(0);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
@@ -583,6 +585,13 @@ function FlowEditorInner() {
 
   /* ---- Handlers ---- */
   const handleRun = useCallback(() => {
+    const compiled = compileWorkflowGraph(nodes, edges);
+    if (!compiled.ok) {
+      setWorkflowRunning(false);
+      setRunError(compiled.diagnostics[0]?.message ?? 'Workflow graph is invalid');
+      return;
+    }
+    setRunError(null);
     setWorkflowRunning(false);
     void apiFetch('/api/cancel-workflow-tasks', {
       method: 'POST',
@@ -593,9 +602,10 @@ function FlowEditorInner() {
       .finally(() => {
         setWorkflowRunning(true);
       });
-  }, [apiFetch]);
+  }, [apiFetch, edges, nodes]);
 
   const handleStop = useCallback(() => {
+    setRunError(null);
     setWorkflowRunning(false);
     void apiFetch('/api/cancel-workflow-tasks', {
       method: 'POST',
@@ -605,6 +615,7 @@ function FlowEditorInner() {
   }, [apiFetch]);
 
   const handleClear = useCallback(() => {
+    setRunError(null);
     setWorkflowRunning(false);
     void apiFetch('/api/cancel-workflow-tasks', {
       method: 'POST',
@@ -655,7 +666,7 @@ function FlowEditorInner() {
       const res = await fetch('/api/workflow-library', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, nodes: cleanNodes, edges: cleanEdges }),
+        body: JSON.stringify({ schemaVersion: SAVED_WORKFLOW_SCHEMA_VERSION, name, nodes: cleanNodes, edges: cleanEdges }),
       });
       if (!res.ok) throw new Error('Save failed');
       // Trigger sidebar refresh
@@ -668,11 +679,10 @@ function FlowEditorInner() {
   const handleLoadWorkflow = useCallback(
     (entry: { nodes: unknown[]; edges: unknown[] }) => {
       setWorkflowRunning(false);
-      const loadedNodes = entry.nodes as Node[];
-      const loadedEdges = entry.edges as Edge[];
-      const sanitized = sanitizeLoadedWorkflowGraph(loadedNodes, loadedEdges);
-      setNodes(sanitized.nodes);
-      setEdges(sanitized.edges.map((edge) => normalizeWorkflowEdge(edge, sanitized.nodes)));
+      setRunError(null);
+      const migrated = migrateSavedWorkflow(entry);
+      setNodes(migrated.nodes);
+      setEdges(migrated.edges.map((edge) => normalizeWorkflowEdge(edge, migrated.nodes)));
       setTimeout(() => fitView({ padding: 0.2 }), 100);
     },
     [setNodes, setEdges, fitView, setWorkflowRunning],
@@ -704,6 +714,7 @@ function FlowEditorInner() {
           onSaveWorkflow={handleSaveWorkflow}
           workflowRunning={workflowRunning}
           progress={{ done: workflowProgress, total: workflowTotal }}
+          runError={runError}
         />
 
         <div className="relative flex-1 overflow-hidden">

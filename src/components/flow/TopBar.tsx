@@ -9,6 +9,7 @@ interface TopBarProps {
   onSaveWorkflow: () => void;
   workflowRunning: boolean;
   progress: { done: number; total: number };
+  runError?: string | null;
 }
 
 export default function TopBar({
@@ -18,6 +19,7 @@ export default function TopBar({
   onSaveWorkflow,
   workflowRunning,
   progress,
+  runError,
 }: TopBarProps) {
   return (
     <div className="flex h-[54px] items-center justify-between border-b border-zinc-800 bg-zinc-900 px-4">
@@ -36,6 +38,11 @@ export default function TopBar({
             {progress.done}/{progress.total} completed
           </span>
         )}
+        {!workflowRunning && runError ? (
+          <span className="mr-2 max-w-[360px] truncate text-[11px] font-medium text-red-300" title={runError}>
+            {runError}
+          </span>
+        ) : null}
         <button
           onClick={onSaveWorkflow}
           className="flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-white"

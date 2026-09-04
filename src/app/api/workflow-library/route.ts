@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import path from 'path';
 import { DEFAULT_WORKFLOW_ID, createDefaultWorkflowEntry } from '@/lib/default-workflow';
+import { SAVED_WORKFLOW_SCHEMA_VERSION } from '@/lib/workflow/schema';
 
 const WORKFLOWS_FILE = path.join(process.cwd(), 'public', 'workflow-library', 'workflows.json');
 
 export interface WorkflowEntry {
+  schemaVersion?: number;
   id: string;
   name: string;
   nodes: unknown[];
@@ -63,6 +65,7 @@ export async function POST(request: NextRequest) {
       name?: string;
       nodes?: unknown[];
       edges?: unknown[];
+      schemaVersion?: number;
     };
 
     if (!name || !nodes || !edges) {
@@ -74,6 +77,7 @@ export async function POST(request: NextRequest) {
     const id = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const entry: WorkflowEntry = {
+      schemaVersion: SAVED_WORKFLOW_SCHEMA_VERSION,
       id,
       name,
       nodes,
