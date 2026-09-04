@@ -1,4 +1,7 @@
-export type NodeCategory = 'input' | 'reconstruction' | 'asset' | 'output' | 'annotation';
+import { WORKFLOW_NODE_REGISTRY } from '@/lib/workflow/node-registry';
+import type { WorkflowNodeCategory } from '@/lib/workflow/types';
+
+export type NodeCategory = WorkflowNodeCategory;
 
 export interface NodeVisualTheme {
   accent: string;
@@ -55,80 +58,14 @@ export const NODE_CATEGORY_THEMES: Record<NodeCategory, NodeVisualTheme> = {
   },
 };
 
-export const NODE_TYPE_CONFIGS: NodeTypeConfig[] = [
-  {
-    type: 'videoUpload',
-    label: 'Video Upload',
-    category: 'input',
-    color: NODE_CATEGORY_THEMES.input.accent,
-    icon: '📹',
-    description: 'upload video and set frame count',
-  },
-  {
-    type: 'frameExtraction',
-    label: 'Frame Extraction',
-    category: 'reconstruction',
-    color: NODE_CATEGORY_THEMES.reconstruction.accent,
-    icon: '🎞️',
-    description: 'video -> image',
-  },
-  {
-    type: 'gaussianSplat',
-    label: 'Gaussian Splat Gen',
-    category: 'reconstruction',
-    color: NODE_CATEGORY_THEMES.reconstruction.accent,
-    icon: '✦',
-    description: 'image/PLY -> splat PLY',
-  },
-  {
-    type: 'modelSurface',
-    label: 'Surface Processing',
-    category: 'asset',
-    color: NODE_CATEGORY_THEMES.asset.accent,
-    icon: '🧱',
-    description: 'model -> model',
-  },
-  {
-    type: 'modelOrganize',
-    label: 'Model Cleanup',
-    category: 'asset',
-    color: NODE_CATEGORY_THEMES.asset.accent,
-    icon: '🧹',
-    description: 'model -> model',
-  },
-  {
-    type: 'modelGeneration',
-    label: 'Mesh Gen',
-    category: 'asset',
-    color: NODE_CATEGORY_THEMES.asset.accent,
-    icon: '▣',
-    description: 'splat/PLY/OBJ/GLB -> GLB/OBJ/PLY',
-  },
-  {
-    type: 'comfyVideo',
-    label: 'ComfyUI Video Gen',
-    category: 'output',
-    color: NODE_CATEGORY_THEMES.output.accent,
-    icon: '▶',
-    description: 'model -> ComfyUI video',
-  },
-  {
-    type: 'videoPreview',
-    label: 'Video Preview',
-    category: 'output',
-    color: NODE_CATEGORY_THEMES.output.accent,
-    icon: '🎬',
-    description: 'model -> video',
-  },
-  {
-    type: 'stickyNote',
-    label: 'Sticky Note',
-    category: 'annotation',
-    color: NODE_CATEGORY_THEMES.annotation.accent,
-    icon: '📝',
-    description: 'record your idea',
-  },
-];
+export const NODE_TYPE_CONFIGS: NodeTypeConfig[] = Object.values(WORKFLOW_NODE_REGISTRY).map((definition) => ({
+  type: definition.type,
+  label: definition.label,
+  category: definition.category,
+  color: NODE_CATEGORY_THEMES[definition.category].accent,
+  icon: definition.icon,
+  description: definition.description,
+}));
 
 export function getNodeConfig(type: string): NodeTypeConfig | undefined {
   return NODE_TYPE_CONFIGS.find((c) => c.type === type);

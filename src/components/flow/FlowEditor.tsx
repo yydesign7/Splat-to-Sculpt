@@ -45,11 +45,11 @@ import { computeDownstreamPushes, isNodeDone } from '@/lib/workflow-engine';
 import { getNodeVisualTheme } from '@/lib/node-config';
 import { initialEdges, initialNodes } from '@/lib/default-workflow';
 import { buildClearedWorkflowGraph } from '@/lib/workflow-clear';
-import { buildDefaultComfyVideoNodeData } from '@/lib/comfyui-video-preset';
 import { getPreferredGaussianMeshOutputHandle } from '@/lib/gaussian-output-routing';
 import { buildAssetDropNodeUpdates } from '@/lib/asset-drop-mapping';
 import { findDropTargetNode } from '@/lib/flow-node-hit-test';
 import { sanitizeLoadedWorkflowGraph } from '@/lib/workflow-load-sanitizer';
+import { createDefaultNodeData, isWorkflowNodeType } from '@/lib/workflow/node-registry';
 
 /* ========== Node Types Registry ========== */
 const nodeTypes: NodeTypes = {
@@ -205,48 +205,10 @@ function areWorkflowValuesEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
-/* ========== Default Node Data Map ========== */
-type NodeKind =
-  | 'videoUpload'
-  | 'frameExtraction'
-  | 'gaussianSplat'
-  | 'modelOrganize'
-  | 'comfyVideo'
-  | 'videoPreview'
-  | 'modelSurface'
-  | 'modelGeneration'
-  | 'stickyNote';
-
-const defaultDataMap: Record<NodeKind, Record<string, unknown>> = {
-  videoUpload: {
-    label: 'Video Upload',
-    videoUrl: null,
-    coverUrl: null,
-    videoName: null,
-    videoServerPath: null,
-    uploadStatus: 'idle',
-    uploadError: null,
-    targetFrameCount: 120,
-  },
-  frameExtraction: { label: 'Frame Extraction', videoServerPath: null, targetFrameCount: 120, frames: [], outputFolder: null, frameCount: 0, status: 'idle', errorMessage: null },
-  gaussianSplat: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null },
-  modelOrganize: { label: 'Model Cleanup', modelUrl: null, outputUrl: null, outputType: null, isFullscreen: false, organizeStatus: 'idle', errorMessage: null, layerNames: [], layerGlbUrls: [] },
-  comfyVideo: buildDefaultComfyVideoNodeData(),
-  videoPreview: { label: 'Video Preview', videoUrl: null, videoName: null, modelUrl: null, videoGenerating: false, errorMessage: null, lightParams: null },
-  modelSurface: { label: 'Surface Processing', materialFileName: null, materialPreviewUrl: null, modelUrl: null, outputModelUrl: null, outputModelType: null, selectedLayer: null, blenderProcessing: false, blenderError: null, materialParams: { base_color: [0.8, 0.75, 0.7], metallic: 0.0, roughness: 0.5, emissive_color: [0.0, 0.0, 0.0], emissive_strength: 0.0, alpha: 1.0, normal_scale: 1.0 }, renderUrl: null, layerParams: {}, lightParams: { ambientIntensity: 0.6, mainLightIntensity: 0.8, mainLightColor: [1, 1, 1], mainLightAzimuth: 45, mainLightElevation: 45, fillLightIntensity: 0.3, fillLightAzimuth: -135, fillLightElevation: 30, exposure: 1.0 }, layerNames: [], layerGlbUrls: [], layerUrlA: {}, layerUrlB: {}, layerUrlC: {} },
-  modelGeneration: { label: 'Mesh Gen', modelUrl: null, isFullscreen: false, inputType: null, outputUrl: null, outputType: null, meshStatus: 'idle', outputFormat: 'glb', errorMessage: null, faceCount: null, gaussianCount: null, computeBackend: null, renderUrl: null, lightParams: null, layerNames: [], layerGlbUrls: [] },
-  stickyNote: { label: 'Sticky Note', text: '' },
-};
-
-function cloneDefaultData(data: Record<string, unknown>): Record<string, unknown> {
-  return JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
-}
-
 function getClearedNodeData(node: Node): Record<string, unknown> {
-  const defaults = defaultDataMap[node.type as NodeKind];
-  if (!defaults) return { ...(node.data as Record<string, unknown>) };
+  if (!isWorkflowNodeType(node.type)) return { ...(node.data as Record<string, unknown>) };
 
-  const cleared = cloneDefaultData(defaults);
+  const cleared = createDefaultNodeData(node.type);
   if (node.type === 'stickyNote') {
     const current = node.data as Record<string, unknown>;
     cleared.text = typeof current.text === 'string' ? current.text : '';
@@ -600,7 +562,7 @@ function FlowEditorInner() {
 
       // --- Node drop: create a new node on the canvas ---
       const type = event.dataTransfer.getData('application/reactflow');
-      if (!type) return;
+      if (!isWorkflowNodeType(type)) return;
 
       const position = screenToFlowPosition({
         x: event.clientX,
@@ -611,7 +573,7 @@ function FlowEditorInner() {
         id: `${type}-${Date.now()}`,
         type,
         position,
-        data: defaultDataMap[type as NodeKind] || { label: type },
+        data: createDefaultNodeData(type),
       };
 
       setNodes((nds) => [...nds, newNode]);
@@ -660,7 +622,7 @@ function FlowEditorInner() {
     try {
       // Strip runtime data, only save topology + position
       const cleanNodes = nodes.map((n) => {
-        const defaultData = defaultDataMap[n.type as NodeKind] ?? {};
+        const defaultData = isWorkflowNodeType(n.type) ? createDefaultNodeData(n.type) : {};
         if (n.type === 'stickyNote') {
           const d = n.data as Record<string, unknown>;
           return {
