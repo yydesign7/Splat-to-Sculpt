@@ -1,5 +1,8 @@
 import type { Node } from '@xyflow/react';
 import { inferModelTypeFromUrl } from '@/lib/infer-model-type-from-url';
+import { executeFrameExtraction } from './executors/frame-extraction';
+import { executeGaussianSplat } from './executors/gaussian-splat';
+import { executeMeshGeneration } from './executors/mesh-generation';
 import { createNodeDefaultData } from './node-data';
 import type {
   NodeCompletion,
@@ -120,6 +123,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       return updates;
     },
     resetData: resetWithPreservedNote,
+    executor: executeFrameExtraction,
   },
   gaussianSplat: {
     type: 'gaussianSplat',
@@ -176,6 +180,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       return {};
     },
     resetData: resetWithPreservedNote,
+    executor: executeGaussianSplat,
   },
   modelGeneration: {
     type: 'modelGeneration',
@@ -218,6 +223,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       return updates;
     },
     resetData: resetWithPreservedNote,
+    executor: executeMeshGeneration,
   },
   modelOrganize: {
     type: 'modelOrganize',

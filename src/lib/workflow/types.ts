@@ -57,6 +57,7 @@ export interface WorkflowPacket {
 
 export interface WorkflowNodeExecutorContext {
   runId: string;
+  ephemeralSessionId?: string;
   node: Node;
   signal: AbortSignal;
   apiFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
