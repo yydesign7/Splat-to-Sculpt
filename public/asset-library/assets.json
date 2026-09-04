@@ -1,1 +1,182 @@
-[]
+[
+  {
+    "id": "asset_1784037252748_7bgvum",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1784037252748_7bgvum/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1784037252748_7bgvum/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-14T13:54:12.748Z"
+  },
+  {
+    "id": "asset_1784037415717_6awo0k",
+    "name": "GLB Processing_2026-07-29-09-12-30",
+    "assetType": "model",
+    "fileUrl": "/asset-published/asset_1784037415717_6awo0k/mesh_organized_material.glb",
+    "fileType": "glb",
+    "thumbnailUrl": "/asset-published/asset_1784037415717_6awo0k/thumbnail.png",
+    "sourceNode": "modelGeneration",
+    "createdAt": "2026-07-14T13:56:55.717Z"
+  },
+  {
+    "id": "asset_1784037550097_m6q0ry",
+    "name": "Rotation preview video",
+    "assetType": "render-video",
+    "fileUrl": "/asset-published/asset_1784037550097_m6q0ry/mesh_organized_material_rotate_360.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": null,
+    "sourceNode": "videoPreview",
+    "createdAt": "2026-07-14T13:59:10.097Z"
+  },
+  {
+    "id": "asset_1784370358256_o0302y",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1784370358256_o0302y/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1784370358256_o0302y/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-18T10:25:58.257Z"
+  },
+  {
+    "id": "asset_1784862209384_k0le4r",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1784862209384_k0le4r/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1784862209384_k0le4r/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-24T03:03:29.384Z"
+  },
+  {
+    "id": "asset_1784862608777_v85rxw",
+    "name": "Rotation preview video",
+    "assetType": "render-video",
+    "fileUrl": "/asset-published/asset_1784862608777_v85rxw/mesh_organized_material_rotate_360.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": null,
+    "sourceNode": "videoPreview",
+    "createdAt": "2026-07-24T03:10:08.777Z"
+  },
+  {
+    "id": "asset_1784866130595_6gk0et",
+    "name": "uploaded-video",
+    "assetType": "video",
+    "fileUrl": "/asset-published/asset_1784866130595_6gk0et/input.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": "/asset-published/asset_1784866130595_6gk0et/thumbnail.jpg",
+    "sourceNode": "videoUpload",
+    "createdAt": "2026-07-24T04:08:50.595Z"
+  },
+  {
+    "id": "asset_1784866799487_3agm1j",
+    "name": "uploaded-video",
+    "assetType": "video",
+    "fileUrl": "/asset-published/asset_1784866799487_3agm1j/input.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": "/asset-published/asset_1784866799487_3agm1j/thumbnail.jpg",
+    "sourceNode": "videoUpload",
+    "createdAt": "2026-07-24T04:19:59.487Z"
+  },
+  {
+    "id": "asset_1784867264842_9bhj32",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1784867264842_9bhj32/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1784867264842_9bhj32/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-24T04:27:44.842Z"
+  },
+  {
+    "id": "asset_1784867836806_6ldg0f",
+    "name": "Rotation preview video",
+    "assetType": "render-video",
+    "fileUrl": "/asset-published/asset_1784867836806_6ldg0f/mesh_organized_material_rotate_360.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": null,
+    "sourceNode": "videoPreview",
+    "createdAt": "2026-07-24T04:37:16.806Z"
+  },
+  {
+    "id": "asset_1784869836236_x4w9ba",
+    "name": "Rotation preview video",
+    "assetType": "render-video",
+    "fileUrl": "/asset-published/asset_1784869836236_x4w9ba/mesh_organized_material_rotate_360.mp4",
+    "fileType": "mp4",
+    "thumbnailUrl": null,
+    "sourceNode": "videoPreview",
+    "createdAt": "2026-07-24T05:10:36.236Z"
+  },
+  {
+    "id": "asset_1785084789463_dzgsq8",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1785084789463_dzgsq8/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1785084789463_dzgsq8/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-26T16:53:09.463Z"
+  },
+  {
+    "id": "asset_1785086622068_re7dsr",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1785086622068_re7dsr/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1785086622068_re7dsr/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-26T17:23:42.068Z"
+  },
+  {
+    "id": "asset_1785130884203_hlze2b",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1785130884203_hlze2b/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1785130884203_hlze2b/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-27T05:41:24.203Z"
+  },
+  {
+    "id": "asset_1785130971801_4tekx4",
+    "name": "GLB Processing_2026-07-29-09-11-16",
+    "assetType": "model",
+    "fileUrl": "/asset-published/asset_1785130971801_4tekx4/mesh.glb",
+    "fileType": "glb",
+    "thumbnailUrl": "/asset-published/asset_1785130971801_4tekx4/thumbnail.png",
+    "sourceNode": "modelGeneration",
+    "createdAt": "2026-07-27T05:42:51.801Z"
+  },
+  {
+    "id": "asset_1785311759370_j6n3fk",
+    "name": "Gaussian splat",
+    "assetType": "splat",
+    "fileUrl": "/asset-published/asset_1785311759370_j6n3fk/gaussian_splat.ply",
+    "fileType": "splat-ply",
+    "thumbnailUrl": "/asset-published/asset_1785311759370_j6n3fk/thumbnail.png",
+    "sourceNode": "gaussianSplat",
+    "createdAt": "2026-07-29T07:55:59.370Z"
+  },
+  {
+    "id": "asset_1785311885846_s0op6m",
+    "name": "GLB Processing_2026-07-29-09-12-18",
+    "assetType": "model",
+    "fileUrl": "/asset-published/asset_1785311885846_s0op6m/mesh.glb",
+    "fileType": "glb",
+    "thumbnailUrl": "/asset-published/asset_1785311885846_s0op6m/thumbnail.png",
+    "sourceNode": "modelGeneration",
+    "createdAt": "2026-07-29T07:58:05.846Z"
+  },
+  {
+    "id": "asset_1785423104020_6j1oy4",
+    "name": "OBJ Processing_2026-07-30-14-57-39",
+    "assetType": "model",
+    "fileUrl": "/asset-published/asset_1785423104020_6j1oy4/merged.glb",
+    "fileType": "glb",
+    "thumbnailUrl": "/asset-published/asset_1785423104020_6j1oy4/thumbnail.png",
+    "sourceNode": "modelGeneration",
+    "createdAt": "2026-07-30T14:51:44.020Z"
+  }
+]

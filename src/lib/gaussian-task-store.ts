@@ -24,8 +24,6 @@ export interface GaussianTask {
     sourcePlyUrl: string;
     gaussianCount: number;
     format: '3dgs-ply';
-    layerFiles?: string[];
-    layerNames?: string[];
     computeBackend?: string;
   };
   error?: string;

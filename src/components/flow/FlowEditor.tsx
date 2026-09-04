@@ -31,7 +31,6 @@ import TopBar from './TopBar';
 import {
   VideoUploadNode,
   FrameExtractionNode,
-  MaterialNode,
   ModelOrganizeNode,
   VideoPreviewNode,
   ComfyVideoNode,
@@ -50,13 +49,13 @@ import { buildDefaultComfyVideoNodeData } from '@/lib/comfyui-video-preset';
 import { getPreferredGaussianMeshOutputHandle } from '@/lib/gaussian-output-routing';
 import { buildAssetDropNodeUpdates } from '@/lib/asset-drop-mapping';
 import { findDropTargetNode } from '@/lib/flow-node-hit-test';
+import { sanitizeLoadedWorkflowGraph } from '@/lib/workflow-load-sanitizer';
 
 /* ========== Node Types Registry ========== */
 const nodeTypes: NodeTypes = {
   videoUpload: VideoUploadNode,
   frameExtraction: FrameExtractionNode,
   gaussianSplat: GaussianSplatNode,
-  material: MaterialNode,
   modelOrganize: ModelOrganizeNode,
   comfyVideo: ComfyVideoNode,
   videoPreview: VideoPreviewNode,
@@ -211,7 +210,6 @@ type NodeKind =
   | 'videoUpload'
   | 'frameExtraction'
   | 'gaussianSplat'
-  | 'material'
   | 'modelOrganize'
   | 'comfyVideo'
   | 'videoPreview'
@@ -231,13 +229,12 @@ const defaultDataMap: Record<NodeKind, Record<string, unknown>> = {
     targetFrameCount: 120,
   },
   frameExtraction: { label: 'Frame Extraction', videoServerPath: null, targetFrameCount: 120, frames: [], outputFolder: null, frameCount: 0, status: 'idle', errorMessage: null },
-  gaussianSplat: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null, layerFiles: [], layerNames: [] },
-  material: { label: 'Material Gen', status: 'idle', textureCount: null, textInput: '', textureUrl: null, errorMessage: null },
-  modelOrganize: { label: 'Model Cleanup', modelUrl: null, outputUrl: null, outputType: null, isFullscreen: false, organizeStatus: 'idle', errorMessage: null, layerFiles: [], layerNames: [], layerGlbUrls: [] },
+  gaussianSplat: { label: 'Gaussian Splat Gen', framePaths: [], sourcePlyUrl: null, splatUrl: null, gaussianCount: null, status: 'idle', progressText: null, progressStep: null, errorMessage: null, trainingIterations: 1000, currentTrainingIteration: null, maxTrainingIterations: null, activeTaskId: null, deviceType: null, computeBackend: null, trainingMode: 'auto', targetPlyType: null, trueTrainingAvailable: null, trueTrainingUnavailableReason: null },
+  modelOrganize: { label: 'Model Cleanup', modelUrl: null, outputUrl: null, outputType: null, isFullscreen: false, organizeStatus: 'idle', errorMessage: null, layerNames: [], layerGlbUrls: [] },
   comfyVideo: buildDefaultComfyVideoNodeData(),
   videoPreview: { label: 'Video Preview', videoUrl: null, videoName: null, modelUrl: null, videoGenerating: false, errorMessage: null, lightParams: null },
-  modelSurface: { label: 'Surface Processing', materialFileName: null, materialPreviewUrl: null, modelUrl: null, outputModelUrl: null, outputModelType: null, selectedLayer: null, blenderProcessing: false, blenderError: null, materialParams: { base_color: [0.8, 0.75, 0.7], metallic: 0.0, roughness: 0.5, emissive_color: [0.0, 0.0, 0.0], emissive_strength: 0.0, alpha: 1.0, normal_scale: 1.0 }, renderUrl: null, layerParams: {}, lightParams: { ambientIntensity: 0.6, mainLightIntensity: 0.8, mainLightColor: [1, 1, 1], mainLightAzimuth: 45, mainLightElevation: 45, fillLightIntensity: 0.3, fillLightAzimuth: -135, fillLightElevation: 30, exposure: 1.0 }, layerFiles: [], layerNames: [], layerGlbUrls: [], layerUrlA: {}, layerUrlB: {}, layerUrlC: {} },
-  modelGeneration: { label: 'Mesh Gen', modelUrl: null, isFullscreen: false, inputType: null, outputUrl: null, outputType: null, textureUrl: null, meshStatus: 'idle', outputFormat: 'glb', errorMessage: null, faceCount: null, gaussianCount: null, computeBackend: null, renderUrl: null, lightParams: null, layerFiles: [], layerNames: [], layerGlbUrls: [] },
+  modelSurface: { label: 'Surface Processing', materialFileName: null, materialPreviewUrl: null, modelUrl: null, outputModelUrl: null, outputModelType: null, selectedLayer: null, blenderProcessing: false, blenderError: null, materialParams: { base_color: [0.8, 0.75, 0.7], metallic: 0.0, roughness: 0.5, emissive_color: [0.0, 0.0, 0.0], emissive_strength: 0.0, alpha: 1.0, normal_scale: 1.0 }, renderUrl: null, layerParams: {}, lightParams: { ambientIntensity: 0.6, mainLightIntensity: 0.8, mainLightColor: [1, 1, 1], mainLightAzimuth: 45, mainLightElevation: 45, fillLightIntensity: 0.3, fillLightAzimuth: -135, fillLightElevation: 30, exposure: 1.0 }, layerNames: [], layerGlbUrls: [], layerUrlA: {}, layerUrlB: {}, layerUrlC: {} },
+  modelGeneration: { label: 'Mesh Gen', modelUrl: null, isFullscreen: false, inputType: null, outputUrl: null, outputType: null, meshStatus: 'idle', outputFormat: 'glb', errorMessage: null, faceCount: null, gaussianCount: null, computeBackend: null, renderUrl: null, lightParams: null, layerNames: [], layerGlbUrls: [] },
   stickyNote: { label: 'Sticky Note', text: '' },
 };
 
@@ -265,8 +262,6 @@ function getEdgeColor(sourceHandle: string | null | undefined, sourceNodeType?: 
   if (sourceHandle === 'video-output') return '#4a6a8a';
   if (sourceHandle === 'output' && sourceNodeType === 'videoUpload') return '#4a6a8a';
   if (sourceHandle === 'output' && sourceNodeType === 'videoPreview') return '#4a6a8a';
-  // Texture/material handles
-  if (sourceHandle === 'texture-output') return '#aa8a5a';
   // Frame handles → frame extraction node header color
   if (sourceHandle === 'output' && sourceNodeType === 'frameExtraction') return '#6b5f7a';
   // Model handles → 3DGS model generation node header color
@@ -713,13 +708,9 @@ function FlowEditorInner() {
       setWorkflowRunning(false);
       const loadedNodes = entry.nodes as Node[];
       const loadedEdges = entry.edges as Edge[];
-      const filteredEdges = loadedEdges.filter((e) => {
-        const src = loadedNodes.find((n) => n.id === e.source);
-        const tgt = loadedNodes.find((n) => n.id === e.target);
-        return src?.type !== 'stickyNote' && tgt?.type !== 'stickyNote';
-      });
-      setNodes(loadedNodes);
-      setEdges(filteredEdges.map((edge) => normalizeWorkflowEdge(edge, loadedNodes)));
+      const sanitized = sanitizeLoadedWorkflowGraph(loadedNodes, loadedEdges);
+      setNodes(sanitized.nodes);
+      setEdges(sanitized.edges.map((edge) => normalizeWorkflowEdge(edge, sanitized.nodes)));
       setTimeout(() => fitView({ padding: 0.2 }), 100);
     },
     [setNodes, setEdges, fitView, setWorkflowRunning],

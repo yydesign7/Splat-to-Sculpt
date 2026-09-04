@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { Handle, Position, useReactFlow, type NodeProps, type Node } from '@xyflow/react';
-import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Layers, Video, Film, Palette, Box, Check, RotateCcw, StickyNote, Download, Sparkles, Orbit, Brush, Eraser } from 'lucide-react';
+import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Video, Film, Box, Check, RotateCcw, StickyNote, Download, Sparkles, Orbit, Brush, Eraser } from 'lucide-react';
 import { getNodeConfig, getNodeVisualTheme, NODE_WIDTH, VIDEO_PREVIEW_NODE_WIDTH } from '@/lib/node-config';
 import { mergeLayerGlbsInBrowser, isGltfLikeUrl, type LayerGlbEntry } from '@/lib/browser-merge-glb';
 import { GAUSSIAN_TASK_MAX_POLL_ATTEMPTS, GAUSSIAN_TASK_POLL_INTERVAL_MS } from '@/lib/gaussian-task-polling';
@@ -15,25 +15,6 @@ import { DEFAULT_COMFY_VIDEO_PRESET } from '@/lib/comfyui-video-preset';
 import type { ComfyVideoPreset, ComfyVideoRunSettings } from '@/lib/comfyui-workflow';
 import dynamic from 'next/dynamic';
 import { DynamicPreviewImage } from './DynamicPreviewImage';
-
-/** Record a model generation event to the history API */
-async function recordModelHistory(params: {
-  name: string;
-  modelUrl: string | null;
-  modelType: string | null;
-  thumbnailUrl?: string | null;
-  sourceNode: string;
-}) {
-  try {
-    await fetch('/api/model-history', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-  } catch {
-    // Silently fail — history is non-critical
-  }
-}
 
 type AssetType = 'video' | 'pointcloud' | 'splat' | 'model' | 'render-video';
 type GaussianDeviceType = 'cuda' | 'mps' | 'cpu';
@@ -140,7 +121,7 @@ async function waitForGaussianTask(
     currentTrainingIteration?: number;
     maxTrainingIterations?: number;
   }) => void,
-): Promise<{ splatUrl: string; sourcePlyUrl: string; gaussianCount: number; format: '3dgs-ply'; layerFiles?: string[]; layerNames?: string[]; deviceType?: GaussianDeviceType; computeBackend?: string; trainingMode?: GaussianTrainingMode; targetPlyType?: string }> {
+): Promise<{ splatUrl: string; sourcePlyUrl: string; gaussianCount: number; format: '3dgs-ply'; deviceType?: GaussianDeviceType; computeBackend?: string; trainingMode?: GaussianTrainingMode; targetPlyType?: string }> {
   for (let attempt = 0; attempt < GAUSSIAN_TASK_MAX_POLL_ATTEMPTS; attempt++) {
     const r = await fetchImpl(`/api/gaussian-status?taskId=${encodeURIComponent(taskId)}`);
     const task = await r.json();
@@ -320,17 +301,6 @@ type GaussianSplatNodeData = Node<{
   targetPlyType: string | null;
   trueTrainingAvailable?: boolean | null;
   trueTrainingUnavailableReason?: string | null;
-  layerFiles: string[];
-  layerNames: string[];
-}>;
-
-type MaterialNodeData = Node<{
-  label: string;
-  status: 'idle' | 'processing' | 'done' | 'error';
-  textureCount: number | null;
-  textInput: string;
-  textureUrl: string | null;
-  errorMessage: string | null;
 }>;
 
 type ModelOrganizeNodeData = Node<{
@@ -341,7 +311,6 @@ type ModelOrganizeNodeData = Node<{
   isFullscreen: boolean;
   organizeStatus: 'idle' | 'organizing' | 'done' | 'error';
   errorMessage: string | null;
-  layerFiles: string[];
   layerNames: string[];
   /** When set, cleanup runs one Blender job per entry (same order as layerNames). */
   layerGlbUrls: string[];
@@ -503,8 +472,7 @@ type ModelSurfaceNodeData = Node<{
   renderUrl: string | null;
   layerParams: Record<string, MaterialParams>;  // per-layer params
   lightParams: LightParams;
-  layerFiles: string[];  // PLY layer file paths from point cloud segmentation
-  layerNames: string[];  // Layer names from segmentation metadata
+  layerNames: string[];  // Layer names from Mesh Gen geometry segmentation metadata
   /** One GLB per layer (order matches layerNames); from 3DGS or cleanup. */
   layerGlbUrls: string[];
   /** Per-layer original GLB URLs (url_a), keyed by layer name. */
@@ -522,7 +490,6 @@ type ModelGenerationNodeData = Node<{
   outputUrl: string | null;
   outputType: 'glb' | 'fbx' | 'obj' | 'ply' | 'splat' | null;
   inputType: 'ply' | 'obj' | 'glb' | 'splat' | null;
-  textureUrl: string | null;
   meshStatus: 'idle' | 'processing' | 'done' | 'error';
   outputFormat: 'glb' | 'obj' | 'ply';
   errorMessage: string | null;
@@ -531,7 +498,6 @@ type ModelGenerationNodeData = Node<{
   computeBackend: string | null;
   renderUrl: string | null;
   lightParams: LightParams | null;
-  layerFiles: string[];
   layerNames: string[];
   layerGlbUrls: string[];
 }>;
@@ -546,7 +512,6 @@ const HEADER_ICONS: Record<string, React.ReactNode> = {
   videoUpload: <Video size={14} />,
   frameExtraction: <Film size={14} />,
   gaussianSplat: <Orbit size={14} />,
-  material: <Palette size={14} />,
   modelOrganize: <Eraser size={14} />,
   comfyVideo: <Sparkles size={14} />,
   videoPreview: <MonitorPlay size={14} />,
@@ -1449,7 +1414,7 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
   );
 }
 
-/* ========== Layer Display Colors (matches pointcloud_segment.py COLOR_PALETTE) ========== */
+/* ========== Layer display colors used for geometry-layer selection ========== */
 const LAYER_DISPLAY_COLORS = [
   '#FF0000', '#00FF00', '#0000FF', '#FFFF00',
   '#FF00FF', '#00FFFF', '#FF8000', '#8000FF',
@@ -1784,8 +1749,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                       computeBackend: null,
                       trainingMode: 'auto' as const,
                       targetPlyType: null,
-                      layerFiles: [] as string[],
-                      layerNames: [] as string[],
                     },
                   }
                 : n
@@ -1849,8 +1812,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                 activeTaskId: null,
                 computeBackend: null,
                 targetPlyType: null,
-                layerFiles: [] as string[],
-                layerNames: [] as string[],
               },
             }
           : n
@@ -2032,8 +1993,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
                     computeBackend: result.computeBackend || null,
                     trainingMode: result.trainingMode ?? n.data.trainingMode,
                     targetPlyType: result.targetPlyType ?? n.data.targetPlyType,
-                    layerFiles: result.layerFiles || [],
-                    layerNames: result.layerNames || [],
                     status: 'done' as const,
                     progressText: null,
                     progressStep: null,
@@ -2462,206 +2421,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
 }
 
 /* ====================================================================
-   5. Material Generation Node
-   ==================================================================== */
-export function MaterialNode({ id, data }: NodeProps<MaterialNodeData>) {
-  const { setNodes, getEdges } = useReactFlow();
-  const { workflowRunning, apiFetch } = useWorkflow();
-  const [status, setStatus] = useState<'idle' | 'processing' | 'done' | 'error'>(data.status || 'idle');
-  const [textInput, setTextInput] = useState(data.textInput ?? '');
-  const [textureUrl, setTextureUrl] = useState<string | null>(data.textureUrl);
-  const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
-
-  const handleDelete = useCallback(() => {
-    setNodes((nds) => nds.filter((n) => n.id !== id));
-  }, [id, setNodes]);
-
-  // Push textureUrl to downstream nodes when texture is ready
-  useEffect(() => {
-    if (data.textureUrl) {
-      const edges = getEdges();
-      const downstreamEdges = edges.filter((edge) => edge.source === id);
-      if (downstreamEdges.length > 0) {
-        setNodes((nds) =>
-          nds.map((n) => {
-            const edge = downstreamEdges.find((e) => e.target === n.id);
-            if (!edge) return n;
-            const targetHandle = edge.targetHandle;
-            if (targetHandle === 'model-input') {
-              return { ...n, data: { ...n.data, modelUrl: data.textureUrl, inputType: 'ply' as const } };
-            } else if (targetHandle === 'obj-input') {
-              return { ...n, data: { ...n.data, modelUrl: data.textureUrl, inputType: 'obj' as const } };
-            }
-            // Default: texture handle → textureUrl
-            return { ...n, data: { ...n.data, textureUrl: data.textureUrl } };
-          })
-        );
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.textureUrl]);
-
-  const handleTextChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const val = e.target.value;
-      setTextInput(val);
-      setNodes((nds) =>
-        nds.map((n) =>
-          n.id === id
-            ? { ...n, data: { ...n.data, textInput: val } }
-            : n
-        )
-      );
-    },
-    [id, setNodes]
-  );
-
-  const handleConfirm = useCallback(() => {
-    if (!textInput.trim()) return;
-    setStatus('processing');
-    setErrorMessage(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, status: 'processing', errorMessage: null } }
-          : n
-      )
-    );
-
-    apiFetch('/api/generate-texture', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: textInput.trim() }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          const errMsg = result.error || 'Material generation failed';
-          setStatus('error');
-          setErrorMessage(errMsg);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, status: 'error', errorMessage: errMsg } }
-                : n
-            )
-          );
-          return;
-        }
-        setStatus('done');
-        setTextureUrl(result.textureUrl);
-        setErrorMessage(null);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, status: 'done', textureUrl: result.textureUrl, textureCount: 1, errorMessage: null } }
-              : n
-          )
-        );
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Material generation request failed';
-        setStatus('error');
-        setErrorMessage(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, status: 'error', errorMessage: message } }
-              : n
-          )
-        );
-      });
-  }, [id, textInput, setNodes, apiFetch]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
-        handleConfirm();
-      }
-    },
-    [handleConfirm]
-  );
-
-  // Auto-trigger material generation when workflow starts running and text input is already ready
-  useEffect(() => {
-    if (workflowRunning && status === 'idle' && textInput.trim()) {
-      handleConfirm();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowRunning, status]);
-
-  return (
-    <div
-      style={getNodeFrameStyle('material', status)}
-      className={NODE_FRAME_CLASS_NAME}
-    >
-      <NodeHeader type="material" onDelete={handleDelete} />
-      <HandleBar ports={[
-        { type: 'source', id: 'texture-output', label: 'Material', color: '#aa8a5a' },
-      ]} />
-      <div className="p-3 space-y-2">
-        {/* Text input */}
-        <input
-          type="text"
-          value={textInput}
-          onChange={handleTextChange}
-          onKeyDown={handleKeyDown}
-          placeholder="Enter material description..."
-          className="w-full rounded-md border border-zinc-600 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 outline-none transition-colors focus:border-[#8a7e5a]"
-        />
-        {/* Confirm button */}
-        <button
-          onClick={handleConfirm}
-          disabled={status === 'processing' || !textInput.trim()}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--node-accent-soft)] px-3 py-1.5 text-xs text-[var(--node-accent-text)] transition-colors hover:bg-[var(--node-accent-muted)] disabled:opacity-50"
-        >
-          {status === 'processing' ? (
-            <>
-              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--node-accent-muted)] border-t-[var(--node-accent-text)]" />
-              Generating...
-            </>
-          ) : 'OK'}
-        </button>
-        {/* Texture preview */}
-        <PreviewBox className="h-[80px]" placeholder="Material preview">
-          {status === 'processing' ? (
-            <div className="flex items-center gap-2 text-xs text-[var(--node-accent-text)]">
-              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--node-accent-muted)] border-t-[var(--node-accent-text)]" />
-              Generating...
-            </div>
-          ) : textureUrl && status === 'done' ? (
-            <DynamicPreviewImage
-              src={textureUrl}
-              alt="Material preview"
-              className="h-full w-full object-cover"
-              draggable={false}
-            />
-          ) : status === 'error' ? (
-            <div className="flex flex-col items-center justify-center gap-1 px-2">
-              <span className="text-[10px] text-red-400">Generation failed</span>
-              {errorMessage && (
-                <span className="text-center text-[9px] text-zinc-500 line-clamp-2">{errorMessage}</span>
-              )}
-            </div>
-          ) : null}
-          {textureUrl && status === 'done' && (
-            <PreviewDownloadIconButton
-              onClick={() => {
-                const ext = extFromPathname(textureUrl, '.png');
-                const name = buildPreviewDownloadFilename(data.label, id, ext);
-                void downloadFromUrl(textureUrl, name).catch(() => {
-                  /* download may fail on CORS */
-                });
-              }}
-            />
-          )}
-        </PreviewBox>
-      </div>
-    </div>
-  );
-}
-
-/* ====================================================================
    5. Model Organize Node
    ==================================================================== */
 export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>) {
@@ -2829,7 +2588,6 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
                     organizeStatus: 'done' as const,
                     outputUrl: organizedUrl,
                     outputType: organizedType,
-                    layerFiles: data.layerFiles || [],
                     layerNames: data.layerNames || [],
                     layerGlbUrls: data.layerGlbUrls || [],
                     errorMessage: null,
@@ -2851,7 +2609,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
           )
         );
       });
-  }, [id, modelUrl, setNodes, data.layerFiles, data.layerGlbUrls, data.layerNames, apiFetch]);
+  }, [id, modelUrl, setNodes, data.layerGlbUrls, data.layerNames, apiFetch]);
 
   // Auto-organize when workflow is running and input is received from upstream (and not yet organized)
   useEffect(() => {
@@ -2973,7 +2731,6 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
                 outputType: null,
                 organizeStatus: 'idle' as const,
                 errorMessage: null,
-                layerFiles: [] as string[],
                 layerNames: [] as string[],
                 layerGlbUrls: [] as string[],
               },
@@ -2991,11 +2748,9 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
     const downstreamEdges = edges.filter((edge) => edge.source === id);
     if (downstreamEdges.length > 0) {
       const actualType = data.outputType || inferModelType(downstreamOutputUrl) || 'obj';
-      const currentLayerFiles = data.layerFiles || [];
       const currentLayerNames = data.layerNames || [];
       const currentLayerGlbs = data.layerGlbUrls || [];
       const baseUpdate: Record<string, unknown> = {};
-      if (currentLayerFiles.length > 0) baseUpdate.layerFiles = currentLayerFiles;
       if (currentLayerNames.length > 0) baseUpdate.layerNames = currentLayerNames;
       if (currentLayerGlbs.length > 0) baseUpdate.layerGlbUrls = currentLayerGlbs;
       setNodes((nds) =>
@@ -3010,7 +2765,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
         })
       );
     }
-  }, [data.outputUrl, data.organizeStatus, data.outputType, id, getEdges, setNodes, data.layerGlbUrls, data.layerNames, data.layerFiles]);
+  }, [data.outputUrl, data.organizeStatus, data.outputType, id, getEdges, setNodes, data.layerGlbUrls, data.layerNames]);
 
   // Preview: show outputUrl if organized, otherwise show input modelUrl
   const previewUrl = outputUrl || modelUrl;
@@ -4214,7 +3969,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
     data.lightParams || { ...DEFAULT_LIGHT_PARAMS }
   );
 
-  const layerFiles = data.layerFiles || [];
   const layerNames = useMemo(() => data.layerNames || [], [data.layerNames]);
   const hasPerLayerGlbs = (data.layerGlbUrls?.length ?? 0) > 0;
   const layerUrlBForPreview = (data.layerUrlB || {}) as Record<string, string>;
@@ -4619,8 +4373,7 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
       !data.modelUrl &&
       !data.outputModelUrl &&
       !data.materialPreviewUrl &&
-      (data.layerGlbUrls?.length ?? 0) === 0 &&
-      (data.layerFiles?.length ?? 0) === 0;
+      (data.layerGlbUrls?.length ?? 0) === 0;
     if (!cleared) return;
 
     autoBlenderAbortRef.current?.abort();
@@ -4652,7 +4405,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
     data.outputModelUrl,
     data.materialPreviewUrl,
     data.layerGlbUrls,
-    data.layerFiles,
     previewBlobUrl,
     scheduleRevokeBlobUrl,
   ]);
@@ -4721,7 +4473,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
     if (!data.outputModelUrl) return;
     const outputUrl = data.outputModelUrl; // capture for type narrowing in closure
     const currentLightParams = data.lightParams || { ...DEFAULT_LIGHT_PARAMS };
-    const currentLayerFiles = data.layerFiles || [];
     const currentLayerNames = data.layerNames || [];
 
     setNodes((nds) =>
@@ -4732,9 +4483,7 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
         const targetHandle = edge.targetHandle;
 
         // Push outputModelUrl (Blender output with materials baked in) + lightParams
-        // Also forward layerFiles/layerNames from upstream point cloud
         const baseUpdate: Record<string, unknown> = {};
-        if (currentLayerFiles.length > 0) baseUpdate.layerFiles = currentLayerFiles;
         if (currentLayerNames.length > 0) baseUpdate.layerNames = currentLayerNames;
         if (data.layerGlbUrls && data.layerGlbUrls.length > 0) {
           baseUpdate.layerGlbUrls = data.layerGlbUrls;
@@ -4751,22 +4500,7 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
       })
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.outputModelUrl, data.layerGlbUrls, data.layerNames, data.layerFiles]);
-
-  // Record Blender render result to history
-  const lastRecordedOutputUrl = useRef<string | null>(null);
-  useEffect(() => {
-    if (data.outputModelUrl && data.outputModelUrl !== lastRecordedOutputUrl.current) {
-      lastRecordedOutputUrl.current = data.outputModelUrl;
-      recordModelHistory({
-        name: `Surface_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
-        modelUrl: data.outputModelUrl,
-        modelType: data.outputModelType || null,
-        thumbnailUrl: data.renderUrl || null,
-        sourceNode: 'modelSurface',
-      });
-    }
-  }, [data.outputModelUrl, data.outputModelType, data.renderUrl]);
+  }, [data.outputModelUrl, data.layerGlbUrls, data.layerNames]);
 
   // Handle OBJ model upload from local file
   const handleObjFileUpload = useCallback(
@@ -4891,7 +4625,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
                 blenderProcessing: false,
                 blenderError: null,
                 renderUrl: null,
-                layerFiles: [] as string[],
                 layerNames: [] as string[],
                 layerGlbUrls: [] as string[],
                 layerUrlA: {} as Record<string, string>,
@@ -5283,11 +5016,11 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
         </div>
 
         {/* Segmented layer info */}
-        {layerFiles.length > 0 && (
+        {(data.layerGlbUrls?.length ?? 0) > 0 && (
           <div className="space-y-1">
             <div className="flex items-center gap-1">
               <span className="text-[9px] text-zinc-500 uppercase tracking-wider">Layers</span>
-              <span className="text-[9px] text-indigo-400">{layerFiles.length}</span>
+              <span className="text-[9px] text-indigo-400">{data.layerGlbUrls?.length ?? 0}</span>
               <span className="ml-1 text-[9px] text-zinc-600">use layer buttons or click model</span>
             </div>
             {selectedLayer && (
@@ -5665,7 +5398,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
   const [outputUrl, setOutputUrl] = useState<string | null>(data.outputUrl);
   const [outputType, setOutputType] = useState<'glb' | 'fbx' | 'obj' | 'ply' | 'splat' | null>(data.outputType);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [textureUrl, setTextureUrl] = useState<string | null>(data.textureUrl);
   const [meshStatus, setMeshStatus] = useState<'idle' | 'processing' | 'done' | 'error'>(data.meshStatus || 'idle');
   const [outputFormat, setOutputFormat] = useState<'glb' | 'obj' | 'ply'>(data.outputFormat || 'glb');
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
@@ -5680,27 +5412,10 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
   // Helper: check if a URL is a browser blob URL (not yet uploaded to server)
   const isBlobUrl = (url: string | null): boolean => !!url && url.startsWith('blob:');
 
-  /** After segmented PLY props update, wait briefly so modelUrl + layerFiles stay in sync before mesh. */
-  const [plyMeshInputsReady, setPlyMeshInputsReady] = useState(true);
-  useEffect(() => {
-    if (inputType !== 'ply') {
-      setPlyMeshInputsReady(true);
-      return;
-    }
-    const lf = data.layerFiles?.length ?? 0;
-    if (lf === 0) {
-      setPlyMeshInputsReady(true);
-      return;
-    }
-    setPlyMeshInputsReady(false);
-    const t = window.setTimeout(() => setPlyMeshInputsReady(true), 400);
-    return () => window.clearTimeout(t);
-  }, [modelUrl, data.layerFiles, data.layerNames, inputType]);
-
   // Sync from upstream data changes, including global Clear resetting fields to null.
   useEffect(() => {
     if (!data.modelUrl && !data.outputUrl && !data.renderUrl) {
-      for (const url of [modelUrl, outputUrl, renderUrl, textureUrl]) {
+      for (const url of [modelUrl, outputUrl, renderUrl]) {
         if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
       }
       setIsUploading(false);
@@ -5709,7 +5424,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     }
     setModelUrl(data.modelUrl);
     setInputType(data.inputType);
-    setTextureUrl(data.textureUrl);
     setMeshStatus(data.meshStatus || 'idle');
     setOutputUrl(data.outputUrl);
     setOutputType(data.outputType);
@@ -5722,7 +5436,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     setLightParams(data.lightParams || null);
     setLayerGlbUrls(data.layerGlbUrls || []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.modelUrl, data.inputType, data.textureUrl, data.meshStatus, data.outputUrl, data.outputType, data.outputFormat, data.errorMessage, data.faceCount, data.gaussianCount, data.computeBackend, data.renderUrl, data.lightParams, data.layerGlbUrls]);
+  }, [data.modelUrl, data.inputType, data.meshStatus, data.outputUrl, data.outputType, data.outputFormat, data.errorMessage, data.faceCount, data.gaussianCount, data.computeBackend, data.renderUrl, data.lightParams, data.layerGlbUrls]);
 
   // Push model output to downstream nodes when mesh generation is done
   useEffect(() => {
@@ -5738,7 +5452,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
         const currentLightParams = lightParams;
         const forwardLayers: Record<string, unknown> = {};
         if (data.layerNames?.length) forwardLayers.layerNames = data.layerNames;
-        if (data.layerFiles?.length) forwardLayers.layerFiles = data.layerFiles;
         if (layerGlbUrls.length > 0) forwardLayers.layerGlbUrls = layerGlbUrls;
         setNodes((nds) =>
           nds.map((n) => {
@@ -5759,8 +5472,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                   ...forwardLayers,
                 },
               };
-            } else if (targetHandle === 'texture') {
-              return { ...n, data: { ...n.data, textureUrl: downstreamOutputUrl } };
             } else if (targetHandle === 'obj-input') {
               // All nodes now use modelUrl as their input field
               return {
@@ -5779,27 +5490,15 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.meshStatus, data.outputUrl, data.outputType, layerGlbUrls, data.layerNames, data.layerFiles]);
+  }, [data.meshStatus, data.outputUrl, data.outputType, layerGlbUrls, data.layerNames]);
 
-  // History: once per new output URL. Assets: publish reusable mesh model outputs once.
-  const lastHistoryModelUrl = useRef<string | null>(null);
+  // Publish reusable mesh model outputs once.
   const lastAssetLibraryModelUrl = useRef<string | null>(null);
   useEffect(() => {
     if (data.meshStatus !== 'done' || !data.outputUrl || isBlobUrl(data.outputUrl)) return;
 
     const sourceLabel = inputType === 'splat' ? 'Gaussian Splat' : inputType === 'ply' ? 'PLY to Mesh' : inputType === 'glb' ? 'GLB Processing' : 'OBJ Processing';
     const thumbnailUrl = renderUrl || data.renderUrl || null;
-
-    if (data.outputUrl !== lastHistoryModelUrl.current) {
-      lastHistoryModelUrl.current = data.outputUrl;
-      recordModelHistory({
-        name: `${sourceLabel}_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}`,
-        modelUrl: data.outputUrl,
-        modelType: data.outputType || null,
-        thumbnailUrl,
-        sourceNode: 'modelGeneration',
-      });
-    }
 
     const assetCandidate = selectMeshGenerationAssetCandidate({
       outputType: data.outputType,
@@ -5929,14 +5628,13 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
 
   const handleClearMeshPreview = useCallback(() => {
     if (meshStatus === 'processing' || isUploading) return;
-    for (const url of [modelUrl, outputUrl, renderUrl, textureUrl]) {
+    for (const url of [modelUrl, outputUrl, renderUrl]) {
       if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
     }
     setModelUrl(null);
     setInputType(null);
     setOutputUrl(null);
     setOutputType(null);
-    setTextureUrl(null);
     setMeshStatus('idle');
     setErrorMessage(null);
     setFaceCount(null);
@@ -5958,14 +5656,12 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                 inputType: null,
                 outputUrl: null,
                 outputType: null,
-                textureUrl: null,
                 meshStatus: 'idle' as const,
                 errorMessage: null,
                 faceCount: null,
                 gaussianCount: null,
                 computeBackend: null,
                 renderUrl: null,
-                layerFiles: [] as string[],
                 layerNames: [] as string[],
                 layerGlbUrls: [] as string[],
               },
@@ -5973,7 +5669,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           : n
       )
     );
-  }, [id, isUploading, meshStatus, modelUrl, outputUrl, renderUrl, setNodes, textureUrl]);
+  }, [id, isUploading, meshStatus, modelUrl, outputUrl, renderUrl, setNodes]);
 
   const handleFormatChange = useCallback(
     (format: 'glb' | 'obj' | 'ply') => {
@@ -6086,7 +5782,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
                             faceCount: fc,
                             layerGlbUrls: nextLayerGlbUrls,
                             layerNames: nextLayerNames,
-                            layerFiles: [] as string[],
                             segmentationProfile,
                             segmentationLabelCount,
                             segmentationMetadataUrl,
@@ -6151,146 +5846,31 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       });
   }, [id, modelUrl, outputFormat, setNodes, inputType, apiFetch, ephemeralSessionId]);
 
-  // Process model + PNG: extract textures, metadata, UV completion, apply texture, render
-  // Routes to /api/process-glb for GLB input, /api/process-obj for OBJ input
-  const handleProcessObj = useCallback(() => {
-    if (!modelUrl || !textureUrl) return;
-    if (isBlobUrl(modelUrl) || isBlobUrl(textureUrl)) {
-      setErrorMessage('File is uploading, please wait...');
-      return;
-    }
-    if (!ephemeralSessionId) {
-      setErrorMessage('Workspace session not ready. Please wait or refresh.');
-      return;
-    }
-
-    setMeshStatus('processing');
-    setErrorMessage(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, meshStatus: 'processing' as const, errorMessage: null } }
-          : n
-      )
-    );
-
-    // Route to the correct API based on input format
-    const isGlb = inputType === 'glb';
-    const apiUrl = isGlb ? '/api/process-glb' : '/api/process-obj';
-    const requestBody = isGlb
-      ? { glbUrl: modelUrl, textureUrl, outputFormat }
-      : { modelUrl: modelUrl, textureUrl, outputFormat };
-
-    apiFetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          setMeshStatus('error');
-          setErrorMessage(result.error || 'Model processing failed');
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: result.error || 'Model processing failed' } }
-                : n
-            )
-          );
-          return;
-        }
-
-        // Respect outputFormat setting; OBJ is preferred when outputFormat is 'obj'
-        const finalModelUrl = outputFormat === 'obj'
-          ? (result.modelUrl || result.glbUrl)
-          : (result.glbUrl || result.modelUrl);
-        const finalModelType = finalModelUrl === result.glbUrl ? 'glb' as const : 'obj' as const;
-
-        setMeshStatus('done');
-        setOutputUrl(finalModelUrl);
-        setOutputType(finalModelType);
-        setModelUrl(finalModelUrl);
-        setInputType(finalModelType === 'glb' ? 'glb' : 'obj');
-        setFaceCount(result.faceCount);
-        setRenderUrl(result.renderUrl);
-        setErrorMessage(null);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    meshStatus: 'done' as const,
-                    modelUrl: finalModelUrl,
-                    inputType: finalModelType === 'glb' ? 'glb' : 'obj',
-                    outputUrl: finalModelUrl,
-                    outputType: finalModelType,
-                    faceCount: result.faceCount,
-                    renderUrl: result.renderUrl,
-                    errorMessage: null,
-                  },
-                }
-              : n
-          )
-        );
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Model processing request failed';
-        setMeshStatus('error');
-        setErrorMessage(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: message } }
-              : n
-          )
-        );
-      });
-  }, [id, modelUrl, inputType, textureUrl, outputFormat, setNodes, apiFetch, ephemeralSessionId]);
-
   // Auto-trigger when workflow is running and inputs are ready
   useEffect(() => {
     if (!workflowRunning || meshStatus !== 'idle') return;
     if (!modelUrl) return;
 
-    // Check if PNG handle has a connected edge — if so, wait for textureUrl
-    const currentEdges = getEdges();
-    const textureEdge = currentEdges.find(
-      (e) => e.target === id && e.targetHandle === 'texture'
-    );
-
     if (inputType === 'ply') {
-      // PLY input → generate mesh (no PNG dependency)
       handleGenerateMesh();
     } else if (inputType === 'splat') {
-      // Splat input → convert Gaussian centers to GLB mesh for downstream Blender/model nodes.
       handleGenerateMesh();
     } else if (inputType === 'obj' || inputType === 'glb') {
-      // OBJ/GLB input → needs texture (PNG) if connected
-      if (textureEdge && !textureUrl) return; // Wait for PNG
-      if (textureUrl) {
-        // Model + PNG → merge texture and process
-        handleProcessObj();
-      } else {
-        // Model without PNG → directly set as model preview
-        const actualType = inputType || inferModelType(modelUrl) || 'obj';
-        setMeshStatus('done');
-        setModelUrl(modelUrl);
-        setOutputUrl(modelUrl);
-        setOutputType(actualType as 'glb' | 'obj' | 'ply');
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, meshStatus: 'done' as const, modelUrl: modelUrl, inputType: actualType as 'glb' | 'obj' | 'ply', outputUrl: modelUrl, outputType: actualType as 'glb' | 'obj' | 'ply' } }
-              : n
-          )
-        );
-      }
+      const actualType = inputType || inferModelType(modelUrl) || 'obj';
+      setMeshStatus('done');
+      setModelUrl(modelUrl);
+      setOutputUrl(modelUrl);
+      setOutputType(actualType as 'glb' | 'obj' | 'ply');
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === id
+            ? { ...n, data: { ...n.data, meshStatus: 'done' as const, modelUrl, inputType: actualType as 'glb' | 'obj' | 'ply', outputUrl: modelUrl, outputType: actualType as 'glb' | 'obj' | 'ply' } }
+            : n
+        )
+      );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowRunning, modelUrl, inputType, textureUrl, meshStatus]);
+  }, [workflowRunning, modelUrl, inputType, meshStatus]);
 
   const viewerModelType = outputType === 'splat' ? null : outputType;
 
@@ -6302,7 +5882,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       <NodeHeader type="modelGeneration" onDelete={handleDelete} />
       <HandleBar ports={[
         { type: 'target', id: 'model-input', label: 'Model', color: '#7a4a55' },
-        { type: 'target', id: 'texture', label: 'Material', color: '#aa8a5a' },
         { type: 'source', id: 'output', label: 'Model', color: '#7a4a55' },
       ]} />
       <div className="p-3 space-y-2">
@@ -6429,7 +6008,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
             </div>
             <button
               onClick={handleGenerateMesh}
-              disabled={meshStatus === 'processing' || isUploading || !plyMeshInputsReady}
+              disabled={meshStatus === 'processing' || isUploading}
               className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#7a4a55]/20 px-3 py-1.5 text-xs text-[#9a6a74] transition-colors hover:bg-[#7a4a55]/30 disabled:opacity-50"
             >
               <Box size={12} />
@@ -6446,18 +6025,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
           >
             <Box size={12} />
             {meshStatus === 'processing' ? 'Converting...' : meshStatus === 'done' && outputUrl ? 'Regenerate GLB' : 'Convert Splat to GLB'}
-          </button>
-        )}
-
-        {/* Process OBJ/GLB + PNG: texture extraction, UV completion, metadata, rendering */}
-        {modelUrl && (inputType === 'obj' || inputType === 'glb') && textureUrl && (
-          <button
-            onClick={handleProcessObj}
-            disabled={meshStatus === 'processing' || isUploading}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#8a5a66]/20 px-3 py-1.5 text-xs text-[#9a6a74] transition-colors hover:bg-[#8a5a66]/30 disabled:opacity-50"
-          >
-            <Layers size={12} />
-            {meshStatus === 'processing' ? 'Processing...' : meshStatus === 'done' && renderUrl ? 'Re-process' : inputType === 'glb' ? 'Process GLB' : 'Process OBJ'}
           </button>
         )}
 
@@ -6482,24 +6049,14 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
             Ready (Splat → GLB)
           </p>
         )}
-        {modelUrl && inputType === 'ply' && !outputUrl && meshStatus !== 'processing' && plyMeshInputsReady && (
+        {modelUrl && inputType === 'ply' && !outputUrl && meshStatus !== 'processing' && (
           <p className="text-[10px] text-zinc-500">
             Ready (PLY)
           </p>
         )}
-        {modelUrl && inputType === 'ply' && !plyMeshInputsReady && (data.layerFiles?.length ?? 0) > 0 && (
+        {modelUrl && (inputType === 'obj' || inputType === 'glb') && meshStatus !== 'processing' && (
           <p className="text-[10px] text-zinc-500">
-            Syncing layer data…
-          </p>
-        )}
-        {modelUrl && (inputType === 'obj' || inputType === 'glb') && !textureUrl && meshStatus !== 'processing' && (
-          <p className="text-[10px] text-zinc-500">
-            Ready ({inputType?.toUpperCase()}){' - Needs PNG material'}
-          </p>
-        )}
-        {modelUrl && (inputType === 'obj' || inputType === 'glb') && textureUrl && meshStatus !== 'processing' && !renderUrl && (
-          <p className="text-[10px] text-zinc-500">
-            Ready ({inputType?.toUpperCase()} + PNG)
+            Ready ({inputType?.toUpperCase()})
           </p>
         )}
       </div>

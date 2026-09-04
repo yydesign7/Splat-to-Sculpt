@@ -81,14 +81,6 @@ export const NODE_TYPE_CONFIGS: NodeTypeConfig[] = [
     description: 'image/PLY -> splat PLY',
   },
   {
-    type: 'material',
-    label: 'Material Gen',
-    category: 'asset',
-    color: NODE_CATEGORY_THEMES.asset.accent,
-    icon: '🎨',
-    description: 'text -> PNG',
-  },
-  {
     type: 'modelSurface',
     label: 'Surface Processing',
     category: 'asset',

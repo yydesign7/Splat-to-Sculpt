@@ -7,18 +7,15 @@ import path from 'path';
 export interface PointCloudTask {
   status: 'processing' | 'done' | 'error' | 'cancelled';
   progress: string;
-  progressStep: number; // 1-11: Prepare / Feature Extraction / Feature Matching / Sparse Reconstruction / Image Undistortion / Dense Matching / Dense Fusion / Segmentation / Depth Estimation / Depth Alignment & Fusion / Generate PLY
+  progressStep: number; // 1-10: Prepare / Feature Extraction / Feature Matching / Sparse Reconstruction / Image Undistortion / Dense Matching / Dense Fusion / Depth Estimation / Depth Alignment & Fusion / Generate PLY
   activePid?: number;
   enableDepthFusion?: boolean;
-  enableSegmentation?: boolean;
   enableForegroundMask?: boolean;
   /** Browser session id for publishing PLY under .data/ephemeral/<id>/ */
   ephemeralSessionId?: string;
   result?: {
     plyUrl: string;
     pointCount: number;
-    layerFiles?: string[];
-    layerNames?: string[];
     colmapWorkspacePath?: string;
     colmapImagesDir?: string;
     colmapSparseDir?: string;

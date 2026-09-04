@@ -1,1 +1,350 @@
-[]
+[
+  {
+    "id": "wf_1785400916753_4u50dn",
+    "name": "Workflow 07-30, 04:41 PM",
+    "nodes": [
+      {
+        "id": "videoUpload-c60dafa9-6d11-46aa-8439-a07cbea5c2a4",
+        "type": "videoUpload",
+        "position": {
+          "x": 50,
+          "y": 80
+        },
+        "data": {
+          "label": "Video Upload",
+          "videoUrl": null,
+          "coverUrl": null,
+          "videoName": null,
+          "videoServerPath": null,
+          "uploadStatus": "idle",
+          "uploadError": null,
+          "targetFrameCount": 120
+        }
+      },
+      {
+        "id": "frameExtraction-988ee5a3-4fdb-4276-b2d1-bf911ea91323",
+        "type": "frameExtraction",
+        "position": {
+          "x": 400,
+          "y": 80
+        },
+        "data": {
+          "label": "Frame Extraction",
+          "videoServerPath": null,
+          "targetFrameCount": 120,
+          "frames": [],
+          "outputFolder": null,
+          "frameCount": 0,
+          "status": "idle",
+          "errorMessage": null
+        }
+      },
+      {
+        "id": "gaussianSplat-1fbf8a22-0d01-4dbe-8870-66354f0be800",
+        "type": "gaussianSplat",
+        "position": {
+          "x": 750,
+          "y": 80
+        },
+        "data": {
+          "label": "Gaussian Splat Gen",
+          "framePaths": [],
+          "sourcePlyUrl": null,
+          "splatUrl": null,
+          "gaussianCount": null,
+          "status": "idle",
+          "progressText": null,
+          "progressStep": null,
+          "errorMessage": null,
+          "trainingIterations": 1000,
+          "currentTrainingIteration": null,
+          "maxTrainingIterations": null,
+          "activeTaskId": null,
+          "deviceType": null,
+          "computeBackend": null,
+          "trainingMode": "auto",
+          "targetPlyType": null,
+          "trueTrainingAvailable": null,
+          "trueTrainingUnavailableReason": null,
+          "layerFiles": [],
+          "layerNames": []
+        }
+      },
+      {
+        "id": "modelGeneration-508dfd65-eec3-44d8-970a-7f5e2c1fc67d",
+        "type": "modelGeneration",
+        "position": {
+          "x": 1100,
+          "y": 80
+        },
+        "data": {
+          "label": "Mesh Gen",
+          "modelUrl": null,
+          "isFullscreen": false,
+          "inputType": null,
+          "outputUrl": null,
+          "outputType": null,
+          "textureUrl": null,
+          "meshStatus": "idle",
+          "outputFormat": "glb",
+          "errorMessage": null,
+          "faceCount": null,
+          "gaussianCount": null,
+          "computeBackend": null,
+          "renderUrl": null,
+          "lightParams": null,
+          "layerFiles": [],
+          "layerNames": [],
+          "layerGlbUrls": []
+        }
+      },
+      {
+        "id": "modelOrganize-cdfbc38b-d96c-4167-955b-b98b9e258750",
+        "type": "modelOrganize",
+        "position": {
+          "x": 1100,
+          "y": 430
+        },
+        "data": {
+          "label": "Model Cleanup",
+          "modelUrl": null,
+          "outputUrl": null,
+          "outputType": null,
+          "isFullscreen": false,
+          "organizeStatus": "idle",
+          "errorMessage": null,
+          "layerFiles": [],
+          "layerNames": [],
+          "layerGlbUrls": []
+        }
+      },
+      {
+        "id": "modelSurface-f401dc0d-fb49-47f5-aa5e-99914367b305",
+        "type": "modelSurface",
+        "position": {
+          "x": 1450,
+          "y": 80
+        },
+        "data": {
+          "label": "Surface Processing",
+          "materialFileName": null,
+          "materialPreviewUrl": null,
+          "modelUrl": null,
+          "outputModelUrl": null,
+          "outputModelType": null,
+          "selectedLayer": null,
+          "blenderProcessing": false,
+          "blenderError": null,
+          "materialParams": {
+            "base_color": [
+              0.8,
+              0.75,
+              0.7
+            ],
+            "metallic": 0,
+            "roughness": 0.5,
+            "emissive_color": [
+              0,
+              0,
+              0
+            ],
+            "emissive_strength": 0,
+            "alpha": 1,
+            "normal_scale": 1
+          },
+          "renderUrl": null,
+          "layerParams": {},
+          "lightParams": {
+            "ambientIntensity": 0.6,
+            "mainLightIntensity": 0.8,
+            "mainLightColor": [
+              1,
+              1,
+              1
+            ],
+            "mainLightAzimuth": 45,
+            "mainLightElevation": 45,
+            "fillLightIntensity": 0.3,
+            "fillLightAzimuth": -135,
+            "fillLightElevation": 30,
+            "exposure": 1
+          },
+          "layerFiles": [],
+          "layerNames": [],
+          "layerGlbUrls": [],
+          "layerUrlA": {},
+          "layerUrlB": {},
+          "layerUrlC": {}
+        }
+      },
+      {
+        "id": "comfyVideo-650a0202-bd98-4b1d-95a7-cc108fe342d1",
+        "type": "comfyVideo",
+        "position": {
+          "x": 1800,
+          "y": 80
+        },
+        "data": {
+          "label": "ComfyUI Video Gen",
+          "modelUrl": null,
+          "videoUrl": null,
+          "videoName": null,
+          "comfyStatus": "idle",
+          "progressText": null,
+          "errorMessage": null,
+          "promptId": null,
+          "comfyInput3dDir": null,
+          "detectedInputDir": null,
+          "detectedOutputDir": null,
+          "detectedInput3dDir": null,
+          "comfyOnline": null,
+          "comfyVersion": null,
+          "comfyUrl": "http://127.0.0.1:8000",
+          "model": "Seedance 2.0",
+          "prompt": "图片1至图片9是同一枚首饰从不同角度渲染的严格结构参考。必须保持戒圈轮廓、镶爪数量、主石形状、辅石数量、金属颜色、比例和所有设计细节完全一致，不要混合角度，不要增加或删除部件。高端珠宝商业广告，深色影棚，电影级布光，真实微距摄影。镜头从正面英雄角度缓慢推进，产品在展台上平稳旋转，展示侧面镶嵌结构，最后停在主石微距特写。不要文字，不要标志，不要包装盒，不要额外首饰，不要手指遮挡，不要改变产品设计。",
+          "videoResolution": "720p",
+          "ratio": "9:16",
+          "duration": 10,
+          "generateAudio": true,
+          "seed": 20260724,
+          "watermark": false,
+          "sceneSelection": "场景全部对象",
+          "renderResolution": 1024,
+          "background": "深灰影棚",
+          "cameraElevation": 12,
+          "framePadding": 1.25,
+          "renderEngine": "Eevee（快速）",
+          "forceRender": false,
+          "filenamePrefix": "Seedance_Ads/clips/3d_model_shot",
+          "format": "auto",
+          "codec": "auto"
+        }
+      },
+      {
+        "id": "videoPreview-686f8b43-9d0b-4eff-98d5-97dd64aa5a9b",
+        "type": "videoPreview",
+        "position": {
+          "x": 1800,
+          "y": 430
+        },
+        "data": {
+          "label": "Video Preview",
+          "videoUrl": null,
+          "videoName": null,
+          "modelUrl": null,
+          "videoGenerating": false,
+          "errorMessage": null,
+          "lightParams": null
+        }
+      },
+      {
+        "id": "stickyNote-84344fb3-ec11-4fa6-a552-9961d1075617",
+        "type": "stickyNote",
+        "position": {
+          "x": 50,
+          "y": -260
+        },
+        "data": {
+          "label": "Sticky Note",
+          "text": "Drag nodes from the library (left) onto the canvas to build your pipeline."
+        }
+      },
+      {
+        "id": "stickyNote-42569283-54be-43a1-a8a4-4f6c74814df5",
+        "type": "stickyNote",
+        "position": {
+          "x": 50,
+          "y": -88
+        },
+        "data": {
+          "label": "Sticky Note",
+          "text": "Notes are saved when you use Save to Library, then open Workflows in the sidebar."
+        }
+      },
+      {
+        "id": "stickyNote-0acdef6f-c9e2-421d-834f-097071190cb4",
+        "type": "stickyNote",
+        "position": {
+          "x": 750,
+          "y": -88
+        },
+        "data": {
+          "label": "Sticky Note",
+          "text": "Gaussian Splat Gen can run directly from extracted frames, or accept a local .ply as a manual source."
+        }
+      },
+      {
+        "id": "stickyNote-1785400908997",
+        "type": "stickyNote",
+        "position": {
+          "x": 431.404217751582,
+          "y": -97.601049411455
+        },
+        "data": {
+          "label": "Sticky Note",
+          "text": "hi"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-7ef215be-75e1-4d9f-a5af-c6006b0c338e",
+        "source": "videoUpload-c60dafa9-6d11-46aa-8439-a07cbea5c2a4",
+        "sourceHandle": "output",
+        "target": "frameExtraction-988ee5a3-4fdb-4276-b2d1-bf911ea91323",
+        "targetHandle": "input"
+      },
+      {
+        "id": "edge-12ef80a6-2da8-4221-93de-59cd00c9cb48",
+        "source": "frameExtraction-988ee5a3-4fdb-4276-b2d1-bf911ea91323",
+        "sourceHandle": "output",
+        "target": "gaussianSplat-1fbf8a22-0d01-4dbe-8870-66354f0be800",
+        "targetHandle": "input"
+      },
+      {
+        "id": "edge-152c2a2b-e7b9-44b2-9acc-295d73bb258d",
+        "source": "gaussianSplat-1fbf8a22-0d01-4dbe-8870-66354f0be800",
+        "sourceHandle": "mesh-output",
+        "target": "modelGeneration-508dfd65-eec3-44d8-970a-7f5e2c1fc67d",
+        "targetHandle": "model-input"
+      },
+      {
+        "id": "edge-e4ad73cc-6186-4d07-83e6-7a6d591eec39",
+        "source": "modelGeneration-508dfd65-eec3-44d8-970a-7f5e2c1fc67d",
+        "sourceHandle": "output",
+        "target": "modelOrganize-cdfbc38b-d96c-4167-955b-b98b9e258750",
+        "targetHandle": "obj-input"
+      },
+      {
+        "id": "edge-678bdd5f-f808-4d9e-be4b-44ba26f9cefa",
+        "source": "modelOrganize-cdfbc38b-d96c-4167-955b-b98b9e258750",
+        "sourceHandle": "obj-output",
+        "target": "modelSurface-f401dc0d-fb49-47f5-aa5e-99914367b305",
+        "targetHandle": "obj-input"
+      },
+      {
+        "id": "edge-947d9dbb-13bb-4a92-8c29-a5c48b0be473",
+        "source": "modelSurface-f401dc0d-fb49-47f5-aa5e-99914367b305",
+        "sourceHandle": "obj-output",
+        "target": "comfyVideo-650a0202-bd98-4b1d-95a7-cc108fe342d1",
+        "targetHandle": "model-input"
+      },
+      {
+        "id": "edge-53ba3169-3344-4dc4-9854-4a99c2aefa63",
+        "source": "comfyVideo-650a0202-bd98-4b1d-95a7-cc108fe342d1",
+        "sourceHandle": "video-output",
+        "target": "videoPreview-686f8b43-9d0b-4eff-98d5-97dd64aa5a9b",
+        "targetHandle": "video-input"
+      },
+      {
+        "id": "xy-edge__videoUpload-1785400841105output-frameExtraction-988ee5a3-4fdb-4276-b2d1-bf911ea91323input",
+        "source": "videoUpload-1785400841105",
+        "sourceHandle": "output",
+        "target": "frameExtraction-988ee5a3-4fdb-4276-b2d1-bf911ea91323",
+        "targetHandle": "input"
+      }
+    ],
+    "createdAt": "2026-07-30T08:41:56.753Z",
+    "updatedAt": "2026-07-30T08:41:56.753Z"
+  }
+]

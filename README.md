@@ -205,7 +205,6 @@ vendor/
 
 public/
 ├── asset-library/       # Lightweight asset metadata
-├── model-history/       # Lightweight model history metadata
 └── workflow-library/    # Saved workflow metadata
 ```
 
@@ -221,13 +220,11 @@ public/frames/
 public/uploads/
 public/colmap-scenes/
 public/blender-output/
-public/obj-processed/
 public/rotation-videos/
-public/textures/
 scripts/.mamba-root/
 ```
 
-Fresh clones start with empty local Assets and model history. Large demo assets should be distributed through Releases, cloud storage, or dataset hosting instead of the source repository.
+Fresh clones start with empty local Assets. Large demo assets should be distributed through Releases, cloud storage, or dataset hosting instead of the source repository.
 
 ## Validation
 

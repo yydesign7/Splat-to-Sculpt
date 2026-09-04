@@ -13,7 +13,6 @@ import {
   resolveClientMediaUrlToFilesystem,
 } from '@/lib/ephemeral-storage';
 import { killProcessTree } from '@/lib/process-tree';
-import { shouldRunGaussianAutoLayers } from '@/lib/gaussian-segmentation-policy';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,8 +32,6 @@ type TrainingSupportInfo = {
 type PointCloudStageResult = {
   plyUrl: string;
   pointCount: number;
-  layerFiles?: string[];
-  layerNames?: string[];
   colmapWorkspacePath?: string;
   colmapImagesDir?: string;
   colmapSparseDir?: string;
@@ -47,7 +44,6 @@ type GaussianPipelineInput = {
   framePaths?: string[];
   trainingIterations: number;
   trainingMode: GaussianTrainingMode;
-  enableSegmentation: boolean;
   ephemeralSessionId: string;
 };
 
@@ -327,7 +323,6 @@ export async function POST(request: NextRequest) {
     framePaths?: string[];
     trainingIterations?: number;
     trainingMode?: GaussianTrainingMode;
-    enableSegmentation?: boolean;
     ephemeralSessionId?: string;
   };
   const trainingIterations = normalizeTrainingIterations(requestedTrainingIterations);
@@ -374,11 +369,6 @@ export async function POST(request: NextRequest) {
   const trainingMode: GaussianTrainingMode = isPlyOnlyInput
     ? 'auto'
     : requestedTrainingMode === 'train' && trainingSupport.trueTrainingAvailable ? 'train' : 'auto';
-  const enableSegmentation = shouldRunGaussianAutoLayers({
-    requested: body.enableSegmentation,
-    hasPly,
-    hasFrames,
-  });
   const targetPlyType = isPlyOnlyInput ? '3DGS-field initializer splat PLY' : getTargetPlyType(backend, trainingMode);
   const computeBackend = isPlyOnlyInput && requestedTrainingMode === 'train'
     ? `${backend.label}; uploaded PLY uses initializer`
@@ -400,7 +390,7 @@ export async function POST(request: NextRequest) {
 
   runGaussianPipeline(
     taskId,
-    { plyUrl, framePaths, trainingIterations, trainingMode, enableSegmentation, ephemeralSessionId },
+    { plyUrl, framePaths, trainingIterations, trainingMode, ephemeralSessionId },
     request.nextUrl.origin,
     backend,
     { nsTrainCommand, nsExportCommand, pythonCommand },
@@ -477,7 +467,6 @@ async function runPointCloudStage(
       // Use COLMAP sparse reconstruction as the camera/pose foundation, then
       // continue through dense matching + stereo fusion for a better initializer.
       enableDepthFusion: false,
-      enableSegmentation: input.enableSegmentation,
       enableForegroundMask: true,
       ephemeralSessionId: input.ephemeralSessionId,
       preserveColmapWorkspace: true,
@@ -509,8 +498,6 @@ async function runGaussianInitializer(params: {
   progress: string;
   computeBackend: string;
   targetPlyType: string;
-  layerFiles?: string[];
-  layerNames?: string[];
 }) {
   const {
     taskId,
@@ -521,8 +508,6 @@ async function runGaussianInitializer(params: {
     progress,
     computeBackend,
     targetPlyType,
-    layerFiles = [],
-    layerNames = [],
   } = params;
   const jobId = randomUUID();
   const outputDir = path.join(getSessionRoot(input.ephemeralSessionId), 'gaussian-splats', jobId, 'export');
@@ -590,8 +575,6 @@ async function runGaussianInitializer(params: {
       sourcePlyUrl,
       gaussianCount: Number(result.gaussianCount) || 0,
       format: '3dgs-ply',
-      layerFiles,
-      layerNames,
       computeBackend,
     },
   });
@@ -616,9 +599,6 @@ async function runGaussianPipeline(
     });
 
     let sourcePlyUrl = input.plyUrl || '';
-    const layerFiles: string[] = [];
-    const layerNames: string[] = [];
-
     if (sourcePlyUrl && (!input.framePaths || input.framePaths.length === 0)) {
       await ensureNotCancelled(taskId);
       await runGaussianInitializer({
@@ -630,8 +610,6 @@ async function runGaussianPipeline(
         progress: 'Generating Gaussian splat initializer from uploaded point cloud...',
         computeBackend: `${backend.label}; uploaded point cloud splat initializer`,
         targetPlyType,
-        layerFiles,
-        layerNames,
       });
       return;
     }
@@ -663,8 +641,6 @@ async function runGaussianPipeline(
           progress: 'Generating Gaussian splat initializer from COLMAP point cloud...',
           computeBackend: `${backend.label}; COLMAP splat initializer fallback`,
           targetPlyType,
-          layerFiles,
-          layerNames,
         });
         return;
       }
@@ -771,8 +747,6 @@ async function runGaussianPipeline(
           sourcePlyUrl,
           gaussianCount: Number(result.gaussianCount) || 0,
           format: '3dgs-ply',
-          layerFiles,
-          layerNames,
           computeBackend: `${scriptBackend} (${backend.label})`,
         },
       });

@@ -14,7 +14,6 @@ const SOURCE_HANDLE_MAP: Record<string, string> = {
   'frameExtraction.output': 'frames',
   'gaussianSplat.mesh-output': 'sourcePlyUrl',
   'gaussianSplat.splat-output': 'splatUrl',
-  'material.texture-output': 'textureUrl',
   'modelOrganize.obj-output': 'outputUrl',
   'modelSurface.obj-output': 'outputModelUrl',
   'modelGeneration.output': 'outputUrl',
@@ -35,16 +34,7 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
     return out;
   },
   'gaussianSplat.input': (value) => ({ framePaths: value as string[] }),
-  'gaussianSplat.ply-input': (value, _sourceNodeType, sourceNodeData) => {
-    const result: Record<string, unknown> = { sourcePlyUrl: value as string };
-    if (sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
-      result.layerFiles = sourceNodeData.layerFiles;
-    }
-    if (sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
-      result.layerNames = sourceNodeData.layerNames;
-    }
-    return result;
-  },
+  'gaussianSplat.ply-input': (value) => ({ sourcePlyUrl: value as string }),
   'modelGeneration.model-input': (value, sourceNodeType, sourceNodeData) => {
     const isGaussianSplat = sourceNodeType === 'gaussianSplat' && sourceNodeData?.splatUrl === value;
     const isPly = sourceNodeType === 'gaussianSplat' && !isGaussianSplat;
@@ -56,12 +46,11 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
     if (sourceNodeData?.lightParams) {
       result.lightParams = sourceNodeData.lightParams;
     }
-    // Forward layerFiles + layerNames from upstream PLY metadata if present
-    if (isPly && sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
-      result.layerFiles = sourceNodeData.layerFiles;
-    }
-    if (isPly && sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
+    if (sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
       result.layerNames = sourceNodeData.layerNames;
+    }
+    if (sourceNodeData?.layerGlbUrls && Array.isArray(sourceNodeData.layerGlbUrls)) {
+      result.layerGlbUrls = sourceNodeData.layerGlbUrls;
     }
     if (isGaussianSplat && typeof sourceNodeData?.gaussianCount === 'number') {
       result.gaussianCount = sourceNodeData.gaussianCount;
@@ -71,14 +60,9 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
     }
     return result;
   },
-  'modelGeneration.texture': (value) => ({ textureUrl: value as string }),
   'modelOrganize.obj-input': (value, _sourceNodeType, sourceNodeData) => {
     const url = value as string;
     const result: Record<string, unknown> = { modelUrl: url };
-    // Forward layerFiles + layerNames from upstream model metadata if present
-    if (sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
-      result.layerFiles = sourceNodeData.layerFiles;
-    }
     if (sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
       result.layerNames = sourceNodeData.layerNames;
     }
@@ -89,10 +73,6 @@ const TARGET_HANDLE_MAP: Record<string, (value: unknown, sourceNodeType: string,
   },
   'modelSurface.obj-input': (value, _sourceNodeType, sourceNodeData) => {
     const result: Record<string, unknown> = { modelUrl: value as string };
-    // Forward layerFiles + layerNames from upstream model metadata if present
-    if (sourceNodeData?.layerFiles && Array.isArray(sourceNodeData.layerFiles)) {
-      result.layerFiles = sourceNodeData.layerFiles;
-    }
     if (sourceNodeData?.layerNames && Array.isArray(sourceNodeData.layerNames)) {
       result.layerNames = sourceNodeData.layerNames;
     }
@@ -136,9 +116,7 @@ export interface NodeTriggerInfo {
 
 /**
  * Determines if a node is ready to be triggered (all required inputs available).
- * For ModelGenerationNode specifically:
- * - "model-input" (Model handle) is required — must have data
- * - "texture" (PNG handle) is optional — only required if an edge is connected to it
+ * ModelGenerationNode requires model-input data.
  */
 export function getNodeTriggerInfo(
   node: Node,
@@ -177,17 +155,6 @@ export function getNodeTriggerInfo(
         satisfiedInputs: hasFrames ? ['frames'] : hasPly ? ['point cloud'] : [],
       };
     }
-    case 'material': {
-      // Material needs user text input; no required upstream edge
-      const textInput = d.textInput as string | undefined;
-      const hasText = !!textInput?.trim();
-      return {
-        canTrigger: hasText,
-        reason: hasText ? 'Prompt entered' : 'Waiting for material description',
-        requiredInputs: [],
-        satisfiedInputs: hasText ? ['textInput'] : [],
-      };
-    }
     case 'modelOrganize': {
       const hasInput = !!d.modelUrl;
       const hasIncomingEdge = incomingEdges.length > 0;
@@ -216,28 +183,18 @@ export function getNodeTriggerInfo(
       };
     }
     case 'modelGeneration': {
-      // model-input is required; texture (PNG) is optional but required IF connected
       const hasModelInput = !!d.modelUrl;
-      const textureEdge = incomingEdges.find((e) => e.targetHandle === 'texture');
-      const hasTextureInput = !!d.textureUrl;
-      const textureRequired = !!textureEdge;
-
       const requiredInputs = ['model'];
       const satisfiedInputs: string[] = [];
 
       if (hasModelInput) satisfiedInputs.push('model');
-      if (textureRequired) requiredInputs.push('texture');
-      if (hasTextureInput && textureRequired) satisfiedInputs.push('texture');
-
-      const canTrigger = hasModelInput && (!textureRequired || hasTextureInput);
+      const canTrigger = hasModelInput;
 
       let reason = 'Waiting for input';
       if (canTrigger) {
-        reason = textureRequired ? 'Model + PNG data ready' : 'Model data ready';
+        reason = 'Model data ready';
       } else if (!hasModelInput) {
         reason = 'Waiting for Model input';
-      } else if (textureRequired && !hasTextureInput) {
-        reason = 'Waiting for PNG material input';
       }
 
       return { canTrigger, reason, requiredInputs, satisfiedInputs };
@@ -348,8 +305,6 @@ export function isNodeDone(node: Node | undefined): boolean {
       return d.status === 'done';
     case 'gaussianSplat':
       return d.status === 'done' && !!d.splatUrl;
-    case 'material':
-      return d.status === 'done';
     case 'modelOrganize':
       return d.organizeStatus === 'done';
     case 'modelSurface':
@@ -378,8 +333,6 @@ export function isNodeProcessing(node: Node | undefined): boolean {
       return d.status === 'extracting';
     case 'gaussianSplat':
       return d.status === 'processing';
-    case 'material':
-      return d.status === 'processing';
     case 'modelSurface':
       return !!d.blenderProcessing;
     case 'modelOrganize':
@@ -406,7 +359,6 @@ export function isNodeError(node: Node | undefined): boolean {
       return d.uploadStatus === 'error';
     case 'frameExtraction':
     case 'gaussianSplat':
-    case 'material':
       return d.status === 'error';
     case 'modelOrganize':
       return d.organizeStatus === 'error';
@@ -470,7 +422,7 @@ export function getTopologicalOrder(nodes: Node[], edges: Edge[]): string[] {
 
 /**
  * Maps source handle id → edge color.
- * Each handle type (video, frames, PLY, texture, OBJ, model, video-stream)
+ * Each handle type (video, frames, PLY, OBJ, model, video-stream)
  * gets a distinct color so that edges visually indicate the data type they carry.
  */
 const HANDLE_EDGE_COLOR_MAP: Record<string, string> = {
@@ -480,8 +432,6 @@ const HANDLE_EDGE_COLOR_MAP: Record<string, string> = {
   'frames-output': '#4a7a74',
   // PLY / point cloud data (teal-green)
   'ply-output': '#5a8a82',
-  // Texture / material data (gold)
-  'texture-output': '#8a7e5a',
   // OBJ model data (rose)
   'obj-output': '#8a5a66',
   // Video stream data (blue)

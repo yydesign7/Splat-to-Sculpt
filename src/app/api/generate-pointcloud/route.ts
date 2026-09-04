@@ -121,7 +121,6 @@ export async function POST(request: NextRequest) {
   const {
     framePaths,
     enableDepthFusion = true,
-    enableSegmentation = true,
     enableForegroundMask = true,
     ephemeralSessionId,
     preserveColmapWorkspace = false,
@@ -129,7 +128,6 @@ export async function POST(request: NextRequest) {
   } = body as {
     framePaths?: string[];
     enableDepthFusion?: boolean;
-    enableSegmentation?: boolean;
     enableForegroundMask?: boolean;
     ephemeralSessionId?: string;
     preserveColmapWorkspace?: boolean;
@@ -155,13 +153,12 @@ export async function POST(request: NextRequest) {
     progress: 'Initializing...',
     progressStep: 0,
     enableDepthFusion,
-    enableSegmentation,
     enableForegroundMask,
     ephemeralSessionId,
   });
 
   // Run the heavy COLMAP + depth processing asynchronously
-  runPipeline(taskId, framePaths, enableDepthFusion, enableSegmentation, enableForegroundMask, ephemeralSessionId, preserveColmapWorkspace, colmapOnly).catch(() => {});
+  runPipeline(taskId, framePaths, enableDepthFusion, enableForegroundMask, ephemeralSessionId, preserveColmapWorkspace, colmapOnly).catch(() => {});
 
   // Return the task ID immediately so the client can poll for progress
   return NextResponse.json({
@@ -265,7 +262,6 @@ async function runPipeline(
   taskId: string,
   framePaths: string[],
   enableDepthFusion: boolean,
-  enableSegmentation: boolean,
   enableForegroundMask: boolean,
   ephemeralSessionId: string,
   preserveColmapWorkspace: boolean,
@@ -282,8 +278,6 @@ async function runPipeline(
     const denseDir = path.join(workDir, 'dense');
     const depthDir = path.join(workDir, 'depth_maps');
     const masksDir = path.join(workDir, 'masks');
-    const segmentDir = path.join(workDir, 'segmented');
-    const segStep = enableDepthFusion ? 10 : 8;
 
     await mkdir(imagesDir, { recursive: true });
     await mkdir(sparseDir, { recursive: true });
@@ -406,8 +400,6 @@ async function runPipeline(
         sparseOutputDir,
         pointcloudJobId,
         workDir,
-        enableSegmentation,
-        false,
         masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
@@ -453,8 +445,6 @@ async function runPipeline(
         sparseOutputDir,
         pointcloudJobId,
         workDir,
-        enableSegmentation,
-        enableDepthFusion,
         masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
@@ -485,8 +475,6 @@ async function runPipeline(
         sparseOutputDir,
         pointcloudJobId,
         workDir,
-        enableSegmentation,
-        enableDepthFusion,
         masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
@@ -510,8 +498,6 @@ async function runPipeline(
         sparseOutputDir,
         pointcloudJobId,
         workDir,
-        enableSegmentation,
-        enableDepthFusion,
         masksGenerated ? masksDir : undefined,
         ephemeralSessionId,
         preserveColmapWorkspace,
@@ -585,16 +571,12 @@ async function runPipeline(
                 workDir,
                 'depth-merged',
               );
-              const finalMergedPlyPath = enableSegmentation
-                ? await segmentPointCloud(taskId, foregroundMergedPlyPath, segmentDir, segStep)
-                : foregroundMergedPlyPath;
               await copyResultToSession(
                 taskId,
-                finalMergedPlyPath,
+                foregroundMergedPlyPath,
                 pointcloudJobId,
                 workDir,
                 true,
-                [],
                 ephemeralSessionId,
                 preserveColmapWorkspace,
               );
@@ -610,24 +592,15 @@ async function runPipeline(
       }
     }
 
-    // ── Step 10/8: Segmentation — optional ──────────────────────────────
-    let finalPlyPath = foregroundDensePlyPath;
-    const layerFiles: string[] = [];
-
-    if (enableSegmentation) {
-      finalPlyPath = await segmentPointCloud(taskId, foregroundDensePlyPath, segmentDir, segStep);
-    }
-
     // ── Final step: Copy final PLY as output ────────────────────────────
-    const finalStep = enableDepthFusion ? (enableSegmentation ? 11 : 10) : (enableSegmentation ? 9 : 8);
+    const finalStep = enableDepthFusion ? 10 : 8;
     await setTask(taskId, { progress: 'Generating point cloud file...', progressStep: finalStep });
     await copyResultToSession(
       taskId,
-      finalPlyPath,
+      foregroundDensePlyPath,
       pointcloudJobId,
       workDir,
       false,
-      layerFiles,
       ephemeralSessionId,
       preserveColmapWorkspace,
     );
@@ -720,56 +693,12 @@ async function filterPointCloudByMasks(
   return inputPlyPath;
 }
 
-async function segmentPointCloud(
-  taskId: string,
-  inputPlyPath: string,
-  segmentDir: string,
-  progressStep: number,
-): Promise<string> {
-  await setTask(taskId, { progress: 'Segmenting point cloud...', progressStep });
-
-  const segmentScriptPath = path.join(process.cwd(), 'scripts', 'pointcloud_segment.py');
-  const segmentedPlyPath = path.join(segmentDir, 'output.ply');
-  const layersDir = path.join(segmentDir, 'layers');
-
-  try {
-    await mkdir(segmentDir, { recursive: true });
-
-    const { stdout: segStdout, stderr: segStderr } = await runTrackedCommand(taskId, 'python3', [
-      segmentScriptPath,
-      '--input', inputPlyPath,
-      '--output_ply', segmentedPlyPath,
-      '--layers_dir', layersDir,
-      '--mode', 'segment_all',
-    ], { timeout: 300000 });
-
-    if (segStdout) console.log('[segmentation]', segStdout);
-    if (segStderr) console.error('[segmentation stderr]', segStderr);
-
-    try {
-      const segStat = await stat(segmentedPlyPath);
-      if (segStat.size > 100) {
-        return segmentedPlyPath;
-      }
-    } catch {
-      // Segmented PLY not found, use the original PLY as-is.
-    }
-  } catch (segErr: unknown) {
-    const segErrorMsg = segErr instanceof Error ? segErr.message : 'Segmentation failed';
-    console.error('[segmentation] Error (non-fatal):', segErrorMsg);
-  }
-
-  return inputPlyPath;
-}
-
 /** Copy sparse COLMAP model to PLY and publish as result */
 async function fallbackToSparsePly(
   taskId: string,
   sparseOutputDir: string,
   pointcloudJobId: string,
   workDir: string,
-  enableSegmentation: boolean,
-  enableDepthFusion: boolean,
   masksDir: string | undefined,
   ephemeralSessionId: string,
   preserveColmapWorkspace: boolean,
@@ -818,8 +747,6 @@ async function fallbackToSparsePly(
     return;
   }
 
-  const segmentDir = path.join(workDir, 'segmented');
-  const segStep = enableDepthFusion ? 10 : 8;
   const foregroundPlyPath = await filterPointCloudByMasks(
     taskId,
     plySrcPath,
@@ -828,17 +755,12 @@ async function fallbackToSparsePly(
     workDir,
     'sparse',
   );
-  const finalPlyPath = enableSegmentation
-    ? await segmentPointCloud(taskId, foregroundPlyPath, segmentDir, segStep)
-    : foregroundPlyPath;
-
   await copyResultToSession(
     taskId,
-    finalPlyPath,
+    foregroundPlyPath,
     pointcloudJobId,
     workDir,
     false,
-    [],
     ephemeralSessionId,
     preserveColmapWorkspace,
   );
@@ -851,7 +773,6 @@ async function copyResultToSession(
   pointcloudJobId: string,
   workDir: string,
   withDepthFusion: boolean,
-  layerFiles: string[],
   ephemeralSessionId: string,
   preserveColmapWorkspace: boolean,
 ): Promise<void> {
@@ -860,41 +781,6 @@ async function copyResultToSession(
   await mkdir(destPlyDir, { recursive: true });
   const plyDestPath = path.join(destPlyDir, 'output.ply');
   await copyFile(plySrcPath, plyDestPath);
-
-  const layersSrcDir = path.join(workDir, 'segmented', 'layers');
-  const layersDestDir = path.join(destPlyDir, 'layers');
-  let layerNames: string[] = [];
-  try {
-    const layerEntries = await readdir(layersSrcDir);
-    const plyFiles = layerEntries.filter(f => f.endsWith('.ply'));
-    if (plyFiles.length > 0) {
-      await mkdir(layersDestDir, { recursive: true });
-      for (const f of plyFiles) {
-        await copyFile(path.join(layersSrcDir, f), path.join(layersDestDir, f));
-      }
-      const metaFile = layerEntries.find(f => f === 'layers_meta.json');
-      if (metaFile) {
-        await copyFile(path.join(layersSrcDir, metaFile), path.join(layersDestDir, metaFile));
-      }
-      layerFiles = plyFiles.map((f) =>
-        buildEphemeralFileUrl(ephemeralSessionId, `pointclouds/${pointcloudJobId}/layers/${f}`),
-      );
-
-      if (metaFile) {
-        try {
-          const metaRaw = await readFile(path.join(layersSrcDir, metaFile), 'utf-8');
-          const meta = JSON.parse(metaRaw);
-          if (meta.layers && Array.isArray(meta.layers)) {
-            layerNames = meta.layers.map((l: { name?: string }) => l.name || 'unknown');
-          }
-        } catch {
-          // Ignore metadata parse errors
-        }
-      }
-    }
-  } catch {
-    // No layers to copy
-  }
 
   let pointCount = 0;
   try {
@@ -917,8 +803,6 @@ async function copyResultToSession(
     result: {
       plyUrl: buildEphemeralFileUrl(ephemeralSessionId, `pointclouds/${pointcloudJobId}/output.ply`),
       pointCount,
-      layerFiles,
-      layerNames,
       ...(preserveColmapWorkspace
         ? {
             colmapWorkspacePath: workDir,

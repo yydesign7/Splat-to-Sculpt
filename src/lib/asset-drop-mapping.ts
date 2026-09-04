@@ -48,8 +48,6 @@ export function buildAssetDropNodeUpdates(
       currentTrainingIteration: null,
       maxTrainingIterations: null,
       activeTaskId: null,
-      layerFiles: [],
-      layerNames: [],
     };
   }
 
@@ -78,8 +76,6 @@ export function buildAssetDropNodeUpdates(
       currentTrainingIteration: null,
       maxTrainingIterations: null,
       activeTaskId: null,
-      layerFiles: [],
-      layerNames: [],
     };
   }
 

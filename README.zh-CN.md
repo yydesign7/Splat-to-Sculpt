@@ -205,7 +205,6 @@ vendor/
 
 public/
 ├── asset-library/       # 轻量 Assets 元数据
-├── model-history/       # 轻量模型历史元数据
 └── workflow-library/    # 保存的 workflow 元数据
 ```
 
@@ -221,13 +220,11 @@ public/frames/
 public/uploads/
 public/colmap-scenes/
 public/blender-output/
-public/obj-processed/
 public/rotation-videos/
-public/textures/
 scripts/.mamba-root/
 ```
 
-全新克隆后，本地 Assets 和模型历史会从空状态开始。大型演示资产建议通过 GitHub Releases、云盘或数据集托管平台分发，不要直接放入源码仓库。
+全新克隆后，本地 Assets 会从空状态开始。大型演示资产建议通过 GitHub Releases、云盘或数据集托管平台分发，不要直接放入源码仓库。
 
 ## 验证
 

@@ -68,7 +68,7 @@ function sphericalToCartesian(azimuthDeg: number, elevationDeg: number, radius: 
 /* ---------- HIGHLIGHT_EMISSIVE ---------- */
 const HIGHLIGHT_EMISSIVE = new THREE.Color(0x3a2a2e);
 
-/* ---------- Color palette for layer detection (matches pointcloud_segment.py) ---------- */
+/* ---------- Fallback color palette for layer detection ---------- */
 const LAYER_COLOR_PALETTE: [number, number, number][] = [
   [0.90, 0.40, 0.40],  // 0: Warm Red
   [0.40, 0.70, 0.40],  // 1: Green
