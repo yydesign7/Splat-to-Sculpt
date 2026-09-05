@@ -1,4 +1,5 @@
 import { DEFAULT_COMFY_VIDEO_PRESET } from '@/lib/comfyui-video-preset';
+import { readComfyProbe } from '@/lib/comfyui-service-state';
 import type { ComfyVideoRunSettings } from '@/lib/comfyui-workflow';
 import type { WorkflowNodeExecutorContext } from '../types';
 
@@ -47,43 +48,67 @@ function collectSettings(data: Record<string, unknown>): ComfyVideoRunSettings {
 export async function executeComfyVideo(
   context: WorkflowNodeExecutorContext,
 ): Promise<Record<string, unknown>> {
-  const modelUrl = context.node.data.modelUrl;
-  if (typeof modelUrl !== 'string' || modelUrl.length === 0 || isBlobUrl(modelUrl)) {
-    throw new Error('Model file unavailable, please wait for upload');
-  }
-
-  const settings = collectSettings(context.node.data as Record<string, unknown>);
-  context.reportProgress({
-    ...settings,
-    comfyStatus: 'processing',
-    progressText: 'Submitting to ComfyUI...',
-    errorMessage: null,
-    videoUrl: null,
-    videoName: null,
-    promptId: null,
-  });
-
-  const response = await context.apiFetch('/api/generate-comfy-video', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ modelUrl, settings }),
-    signal: context.signal,
-  });
-  const result = (await response.json()) as ComfyVideoResponse;
-  if (!result.success || typeof result.videoUrl !== 'string') {
-    throw new Error(typeof result.error === 'string' ? result.error : 'ComfyUI video generation failed');
-  }
-
-  return {
-    comfyStatus: 'done',
-    progressText: 'ComfyUI video ready',
-    videoUrl: result.videoUrl,
-    videoName: typeof result.videoName === 'string' ? result.videoName : 'ComfyUI Video',
-    promptId: typeof result.promptId === 'string' ? result.promptId : null,
-    comfyOnline: true,
-    detectedInputDir: typeof result.detectedInputDir === 'string' ? result.detectedInputDir : null,
-    detectedOutputDir: typeof result.detectedOutputDir === 'string' ? result.detectedOutputDir : null,
-    detectedInput3dDir: typeof result.detectedInput3dDir === 'string' ? result.detectedInput3dDir : null,
-    errorMessage: null,
+  const stopDisplay = (): void => {
+    context.reportProgress({ comfyStatus: 'idle', progressText: null });
   };
+  context.signal.throwIfAborted();
+  context.signal.addEventListener('abort', stopDisplay, { once: true });
+  try {
+    const modelUrl = context.node.data.modelUrl;
+    if (typeof modelUrl !== 'string' || modelUrl.length === 0 || isBlobUrl(modelUrl)) {
+      throw new Error('Model file unavailable, please wait for upload');
+    }
+    const settings = collectSettings(context.node.data);
+    context.reportProgress({ comfyStatus: 'processing', progressText: 'Checking ComfyUI requirements…', errorMessage: null });
+    const params = new URLSearchParams({ comfyUrl: settings.comfyUrl || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl });
+    const statusResponse = await context.apiFetch(`/api/comfy-video-status?${params}`, {
+      signal: AbortSignal.any([context.signal, AbortSignal.timeout(7000)]),
+    });
+    const probe = readComfyProbe(await statusResponse.json());
+    context.signal.throwIfAborted();
+    if (probe.kind !== 'connected') {
+      throw new Error(probe.kind === 'unreachable'
+        ? 'ComfyUI 未连接。请启动服务并检查连接后重试。'
+        : probe.kind === 'invalid-url' ? 'ComfyUI 地址无效。请设置有效的本机 HTTP(S) 地址后重试。'
+          : 'ComfyUI 连接检查失败，请检查服务并重试。');
+    }
+    const seedanceResponse = await context.apiFetch(`/api/comfy-seedance-status?${params}`, {
+      signal: AbortSignal.any([context.signal, AbortSignal.timeout(7000)]),
+    });
+    const seedance = await seedanceResponse.json() as { success?: boolean; ready?: boolean };
+    context.signal.throwIfAborted();
+    if (!seedanceResponse.ok || seedance.success !== true) throw new Error('Seedance 检查失败，请检查 ComfyUI 后重试。');
+    if (seedance.ready !== true) throw new Error('Seedance 尚未就绪。请安装所需插件或重启 ComfyUI 后重试。');
+
+    context.reportProgress({
+      ...settings, comfyStatus: 'processing', progressText: 'Submitting to ComfyUI...',
+      errorMessage: null, videoUrl: null, videoName: null, promptId: null,
+    });
+    const response = await context.apiFetch('/api/generate-comfy-video', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelUrl, settings }), signal: context.signal,
+    });
+    const result = await response.json() as ComfyVideoResponse;
+    context.signal.throwIfAborted();
+    if (!response.ok || !result.success || typeof result.videoUrl !== 'string') {
+      throw new Error(typeof result.error === 'string' ? result.error : 'ComfyUI video generation failed');
+    }
+    return {
+      comfyStatus: 'done', progressText: 'ComfyUI video ready', videoUrl: result.videoUrl,
+      videoName: typeof result.videoName === 'string' ? result.videoName : 'ComfyUI Video',
+      promptId: typeof result.promptId === 'string' ? result.promptId : null,
+      detectedInputDir: typeof result.detectedInputDir === 'string' ? result.detectedInputDir : null,
+      detectedOutputDir: typeof result.detectedOutputDir === 'string' ? result.detectedOutputDir : null,
+      detectedInput3dDir: typeof result.detectedInput3dDir === 'string' ? result.detectedInput3dDir : null,
+      errorMessage: null,
+    };
+  } catch (error: unknown) {
+    if (!context.signal.aborted) {
+      context.reportProgress({ comfyStatus: 'error', progressText: null,
+        errorMessage: error instanceof Error ? error.message : 'ComfyUI video generation failed' });
+    }
+    throw error;
+  } finally {
+    context.signal.removeEventListener('abort', stopDisplay);
+  }
 }

@@ -30,8 +30,19 @@ export async function fetchComfyJson(url: string, init?: RequestInit): Promise<u
   return data;
 }
 
-export async function getComfySystemStats(comfyUrl: string): Promise<unknown> {
-  return fetchComfyJson(`${comfyUrl}/system_stats`);
+export async function getComfySystemStats(comfyUrl: string, signal?: AbortSignal): Promise<unknown> {
+  return fetchComfyJson(`${comfyUrl}/system_stats`, { signal });
+}
+
+export function isComfyConnectionFailure(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== 'object' || depth > 5) return false;
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) return true;
+  const record = error as Record<string, unknown>;
+  if (typeof record.code === 'string' && ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'].includes(record.code)) return true;
+  if (error instanceof AggregateError && error.errors.length > 0) {
+    return error.errors.every((cause: unknown) => isComfyConnectionFailure(cause, depth + 1));
+  }
+  return isComfyConnectionFailure(record.cause, depth + 1);
 }
 
 export function readComfyVersion(systemStats: unknown): string | null {

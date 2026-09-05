@@ -3,6 +3,16 @@ import test from 'node:test';
 import type { Edge, Node } from '@xyflow/react';
 import { migrateSavedWorkflow, SAVED_WORKFLOW_SCHEMA_VERSION } from './migrations';
 
+test('loading a ComfyUI node drops legacy probe errors and connection cache', () => {
+  const result = migrateSavedWorkflow({ nodes: [{
+    id: 'comfy', type: 'comfyVideo', position: { x: 0, y: 0 },
+    data: { comfyStatus: 'error', errorMessage: 'fetch failed', comfyOnline: false },
+  }], edges: [] });
+  assert.equal(result.nodes[0].data.comfyStatus, 'idle');
+  assert.equal(result.nodes[0].data.errorMessage, null);
+  assert.equal(Object.hasOwn(result.nodes[0].data, 'comfyOnline'), false);
+});
+
 test('v1 migration strips removed nodes, handles, and runtime fields', () => {
   const legacyNodes: Node[] = [
     {

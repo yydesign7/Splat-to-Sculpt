@@ -177,7 +177,7 @@ export function createWorkflowRunner(host: WorkflowRunnerHost): WorkflowRunner {
       applyNodePatch(runId, nodeId, { errorMessage: message });
       dispatch({ type: 'NODE_FAILED', runId, nodeId, error: message });
     } finally {
-      controllers.delete(nodeId);
+      if (controllers.get(nodeId) === controller) controllers.delete(nodeId);
     }
   }
 

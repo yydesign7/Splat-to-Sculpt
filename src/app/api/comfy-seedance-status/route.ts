@@ -15,7 +15,8 @@ export async function GET(request: NextRequest) {
   try {
     const requestedUrl = request.nextUrl.searchParams.get('comfyUrl');
     const comfyUrl = normalizeComfyUrl(requestedUrl || process.env.COMFYUI_BASE_URL || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl);
-    const systemStats = await getComfySystemStats(comfyUrl);
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(5000)]);
+    const systemStats = await getComfySystemStats(comfyUrl, signal);
     const installFolders = deriveSeedanceInstallFolders(systemStats);
 
     const installedCustomNodes = installFolders.customNodesDir
@@ -38,7 +39,7 @@ export async function GET(request: NextRequest) {
     let loadedNodeTypes: string[] = [];
     let objectInfoError: string | null = null;
     try {
-      loadedNodeTypes = readLoadedNodeTypes(await fetchComfyJson(`${comfyUrl}/object_info`));
+      loadedNodeTypes = readLoadedNodeTypes(await fetchComfyJson(`${comfyUrl}/object_info`, { signal }));
     } catch (error: unknown) {
       objectInfoError = error instanceof Error ? error.message : 'Could not read ComfyUI object info';
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, type DragEvent } from 'react';
+import { useState, useEffect, useCallback, type DragEvent, type RefObject } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -36,7 +36,8 @@ import { DynamicPreviewImage } from './DynamicPreviewImage';
 interface SidebarProps {
   collapsed: boolean;
   onToggle: () => void;
-  onLoadWorkflow: (entry: { nodes: unknown[]; edges: unknown[] }) => void;
+  onLoadWorkflow: (entry: WorkflowEntry) => void;
+  panelRef?: RefObject<HTMLDivElement | null>;
 }
 
 export type AssetType = 'video' | 'pointcloud' | 'splat' | 'model' | 'render-video';
@@ -195,7 +196,7 @@ function formatDate(isoString: string): string {
   return `${year}-${month}-${day} ${hour}:${min}`;
 }
 
-export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: SidebarProps) {
+export default function Sidebar({ collapsed, onToggle, onLoadWorkflow, panelRef }: SidebarProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('nodes');
   const [assets, setAssets] = useState<AssetEntry[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(false);
@@ -422,7 +423,7 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
       </button>
 
       {collapsed ? (
-        <div className="absolute left-0 top-0 z-20 flex h-full w-14 flex-col items-center border-r border-zinc-800 bg-zinc-900/95 pt-14 backdrop-blur-sm">
+        <div ref={panelRef} className="absolute left-0 top-0 z-20 flex h-full w-14 flex-col items-center border-r border-zinc-800 bg-zinc-900/95 pt-14 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-3">
             <button
               onClick={() => {
@@ -457,7 +458,7 @@ export default function Sidebar({ collapsed, onToggle, onLoadWorkflow }: Sidebar
           </div>
         </div>
       ) : (
-        <div className="absolute left-0 top-0 z-20 flex h-full w-[276px] flex-col border-r border-zinc-800 bg-zinc-900/95 pt-14 backdrop-blur-sm">
+        <div ref={panelRef} className="absolute left-0 top-0 z-20 flex h-full w-[276px] flex-col border-r border-zinc-800 bg-zinc-900/95 pt-14 backdrop-blur-sm">
           {/* Tab switcher: Nodes / Assets / Workflows */}
           <div className="flex border-b border-zinc-800">
             <button

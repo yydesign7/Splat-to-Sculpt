@@ -21,6 +21,7 @@ import {
   type Node,
   type NodeTypes,
   type OnConnect,
+  type Viewport,
   BackgroundVariant,
 } from '@xyflow/react';
 import { Trash2 } from 'lucide-react';
@@ -28,6 +29,8 @@ import '@xyflow/react/dist/style.css';
 
 import Sidebar from './Sidebar';
 import TopBar from './TopBar';
+import { WorkflowViewportController } from './WorkflowViewportController';
+import type { ViewportRequest } from '@/lib/workflow-entry-viewport';
 import {
   VideoUploadNode,
   FrameExtractionNode,
@@ -42,7 +45,7 @@ import {
 import { WorkflowContext } from '@/lib/workflow-context';
 import { workflowApiFetch } from '@/lib/workflow-api-fetch';
 import { getNodeVisualTheme } from '@/lib/node-config';
-import { initialEdges, initialNodes } from '@/lib/default-workflow';
+import { DEFAULT_WORKFLOW_ID, initialEdges, initialNodes } from '@/lib/default-workflow';
 import { buildClearedWorkflowGraph } from '@/lib/workflow-clear';
 import { getPreferredGaussianMeshOutputHandle } from '@/lib/gaussian-output-routing';
 import { buildAssetDropNodeUpdates } from '@/lib/asset-drop-mapping';
@@ -137,7 +140,6 @@ const edgeTypes: EdgeTypes = {
 };
 
 /* ========== Stable ReactFlow Configs (module-level to avoid re-renders) ========== */
-const fitViewOptions = { padding: 0.2 };
 const defaultEdgeOptions = {
   type: 'workflow' as const,
   animated: false,
@@ -224,7 +226,14 @@ function FlowEditorInner() {
   const [ephemeralSessionId, setEphemeralSessionId] = useState<string | null>(null);
   const [canvasRevision, setCanvasRevision] = useState(0);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
-  const { screenToFlowPosition, fitView, getEdges } = useReactFlow();
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const viewportRevision = useRef(0);
+  const [viewportRequest, setViewportRequest] = useState<ViewportRequest | null>({ revision: 0, mode: 'entry', anchorId: '1' });
+  const [defaultViewport, setDefaultViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 0.9 });
+  const { screenToFlowPosition, getViewport, getEdges } = useReactFlow();
+  const handleViewportApplied = useCallback((revision: number): void => {
+    setViewportRequest((current) => current?.revision === revision ? null : current);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -462,11 +471,14 @@ function FlowEditorInner() {
 
   const handleClear = useCallback(() => {
     workflowRunner.stop();
+    const viewport = getViewport();
+    setDefaultViewport(viewport);
+    setViewportRequest({ revision: ++viewportRevision.current, mode: 'restore', viewport });
     const cleared = buildClearedWorkflowGraph(nodes, edges, getClearedNodeData);
     setNodes(cleared.nodes);
     setEdges(cleared.edges);
     setCanvasRevision((value) => value + 1);
-  }, [edges, nodes, setEdges, setNodes, workflowRunner]);
+  }, [edges, nodes, setEdges, setNodes, workflowRunner, getViewport]);
 
   /* ---- Save / Load Workflow ---- */
   const handleSaveWorkflow = useCallback(async () => {
@@ -517,14 +529,20 @@ function FlowEditorInner() {
   }, [nodes, edges]);
 
   const handleLoadWorkflow = useCallback(
-    (entry: { nodes: unknown[]; edges: unknown[] }) => {
+    (entry: { id: string; nodes: unknown[]; edges: unknown[] }) => {
       workflowRunner.stop();
       const migrated = migrateSavedWorkflow(entry);
       setNodes(migrated.nodes);
       setEdges(migrated.edges.map((edge) => normalizeWorkflowEdge(edge, migrated.nodes)));
-      setTimeout(() => fitView({ padding: 0.2 }), 100);
+      setDefaultViewport(getViewport());
+      // Loading replaces the workflow, including local settings on nodes with reused IDs.
+      setCanvasRevision((value) => value + 1);
+      const revision = ++viewportRevision.current;
+      setViewportRequest(entry.id === DEFAULT_WORKFLOW_ID
+        ? { revision, mode: 'entry', anchorId: '1' }
+        : { revision, mode: 'overview' });
     },
-    [setNodes, setEdges, fitView, workflowRunner],
+    [setNodes, setEdges, workflowRunner, getViewport],
   );
 
   if (ephemeralSessionId === null) {
@@ -560,6 +578,7 @@ function FlowEditorInner() {
         <div className="relative flex-1 overflow-hidden">
           {/* Sidebar — absolute so it floats over the canvas */}
           <Sidebar
+            panelRef={sidebarRef}
             collapsed={sidebarCollapsed}
             onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
             onLoadWorkflow={handleLoadWorkflow}
@@ -580,13 +599,21 @@ function FlowEditorInner() {
               onDragOver={onDragOver}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
-              fitView
-              fitViewOptions={fitViewOptions}
+              defaultViewport={defaultViewport}
+              minZoom={0.1}
+              onMoveStart={(event) => { if (event) setViewportRequest(null); }}
               defaultEdgeOptions={defaultEdgeOptions}
               deleteKeyCode={null}
               proOptions={proOptions}
               className="bg-zinc-950"
             >
+              <WorkflowViewportController
+                request={viewportRequest}
+                nodes={nodes}
+                canvasRef={reactFlowWrapper}
+                sidebarRef={sidebarRef}
+                onApplied={handleViewportApplied}
+              />
               <Background
                 variant={BackgroundVariant.Dots}
                 gap={20}

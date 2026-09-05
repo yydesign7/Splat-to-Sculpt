@@ -22,6 +22,7 @@ function context(params: {
   node: Node;
   responses: unknown[];
   reportProgress?: (patch: Record<string, unknown>) => void;
+  signal?: AbortSignal;
 }): WorkflowNodeExecutorContext & { requests: string[] } {
   const responses = [...params.responses];
   const requests: string[] = [];
@@ -29,7 +30,7 @@ function context(params: {
     runId: 'run-1',
     ephemeralSessionId: 'session',
     node: params.node,
-    signal: new AbortController().signal,
+    signal: params.signal ?? new AbortController().signal,
     requests,
     apiFetch: async (input) => {
       requests.push(String(input));
@@ -99,7 +100,7 @@ test('Comfy executor returns generated video metadata', async () => {
       prompt: 'product video',
       comfyUrl: 'http://127.0.0.1:8188',
     }),
-    responses: [{
+    responses: [{ kind: 'connected', online: true }, { success: true, ready: true }, {
       success: true,
       videoUrl: '/video.mp4',
       videoName: 'Comfy video',
@@ -111,4 +112,45 @@ test('Comfy executor returns generated video metadata', async () => {
   assert.equal(result.videoUrl, '/video.mp4');
   assert.equal(result.videoName, 'Comfy video');
   assert.equal(result.comfyStatus, 'done');
+});
+
+test('unavailable ComfyUI records a run failure without submitting generation', async () => {
+  const patches: Record<string, unknown>[] = [];
+  const ctx = context({ node: node('comfyVideo', { modelUrl: '/model.glb' }),
+    responses: [{ kind: 'unreachable', online: false }], reportProgress: (patch) => patches.push(patch) });
+  await assert.rejects(executeComfyVideo(ctx), /ComfyUI/);
+  assert.equal(ctx.requests.some((url) => url.includes('/api/generate-comfy-video')), false);
+  assert.equal(patches.at(-1)?.comfyStatus, 'error');
+});
+
+test('missing Seedance requirements prevent job submission', async () => {
+  const ctx = context({ node: node('comfyVideo', { modelUrl: '/model.glb' }),
+    responses: [{ kind: 'connected', online: true }, { success: true, ready: false }] });
+  await assert.rejects(executeComfyVideo(ctx), /Seedance/);
+  assert.equal(ctx.requests.some((url) => url.includes('/api/generate-comfy-video')), false);
+});
+
+test('a generation failure remains a task error after successful service checks', async () => {
+  const patches: Record<string, unknown>[] = [];
+  const ctx = context({ node: node('comfyVideo', { modelUrl: '/model.glb' }),
+    responses: [{ kind: 'connected', online: true }, { success: true, ready: true }, { success: false, error: 'Generation rejected' }],
+    reportProgress: (patch) => patches.push(patch) });
+  await assert.rejects(executeComfyVideo(ctx), /Generation rejected/);
+  assert.equal(patches.at(-1)?.comfyStatus, 'error');
+  assert.equal(patches.at(-1)?.errorMessage, 'Generation rejected');
+});
+
+test('stopping a ComfyUI requirement check clears processing without a task error', async () => {
+  const controller = new AbortController();
+  const patches: Record<string, unknown>[] = [];
+  const ctx = context({ node: node('comfyVideo', { modelUrl: '/model.glb' }), responses: [],
+    signal: controller.signal, reportProgress: (patch) => patches.push(patch) });
+  ctx.apiFetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new DOMException('Stopped', 'AbortError')), { once: true });
+  });
+  const running = executeComfyVideo(ctx);
+  controller.abort();
+  await assert.rejects(running, { name: 'AbortError' });
+  assert.equal(patches.at(-1)?.comfyStatus, 'idle');
+  assert.equal(patches.some((patch) => patch.comfyStatus === 'error'), false);
 });

@@ -11,6 +11,8 @@ import { selectModelCleanupMode } from '@/lib/model-cleanup-mode';
 import { resolveUploadedVideoServerPath, type RecordedAssetResponse } from '@/lib/uploaded-video-asset';
 import { useWorkflow } from '@/lib/workflow-context';
 import { DEFAULT_COMFY_VIDEO_PRESET } from '@/lib/comfyui-video-preset';
+import { useComfyServiceStatus } from '@/hooks/use-comfy-service-status';
+import { COMFY_SERVICE_HINTS, COMFY_SERVICE_LABELS } from '@/lib/comfyui-service-state';
 import type { ComfyVideoPreset, ComfyVideoRunSettings } from '@/lib/comfyui-workflow';
 import dynamic from 'next/dynamic';
 import { DynamicPreviewImage } from './DynamicPreviewImage';
@@ -287,8 +289,6 @@ type ComfyVideoData = Record<string, unknown> & {
   detectedInputDir: string | null;
   detectedOutputDir: string | null;
   detectedInput3dDir: string | null;
-  comfyOnline: boolean | null;
-  comfyVersion: string | null;
 } & ComfyVideoPreset;
 
 type ComfyVideoSettingsUpdates = Partial<ComfyVideoPreset> & {
@@ -296,19 +296,6 @@ type ComfyVideoSettingsUpdates = Partial<ComfyVideoPreset> & {
 };
 
 type ComfyVideoNodeData = Node<ComfyVideoData>;
-
-type SeedancePackStatusResult = {
-  success?: boolean;
-  ready?: boolean;
-  installed?: boolean;
-  loaded?: boolean;
-  customNodesDir?: string | null;
-  workflowsDir?: string | null;
-  missingCustomNodeFolders?: string[];
-  missingWorkflowFiles?: string[];
-  missingNodeTypes?: string[];
-  error?: string;
-};
 
 /** Principled BSDF material parameters matching Blender's node */
 export interface MaterialParams {
@@ -2249,25 +2236,25 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
 export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
   const { setNodes } = useReactFlow();
   const { runSingleNode } = useWorkflow();
-  const [modelUrl, setModelUrl] = useState<string | null>(data.modelUrl);
-  const [videoUrl, setVideoUrl] = useState<string | null>(data.videoUrl);
-  const [videoName, setVideoName] = useState<string | null>(data.videoName);
-  const [comfyStatus, setComfyStatus] = useState<ComfyStatus>(data.comfyStatus || 'idle');
-  const [progressText, setProgressText] = useState<string | null>(data.progressText);
-  const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
-  const [promptId, setPromptId] = useState<string | null>(data.promptId);
-  const [comfyOnline, setComfyOnline] = useState<boolean | null>(data.comfyOnline);
-  const [comfyVersion, setComfyVersion] = useState<string | null>(data.comfyVersion);
-  const [detectedInputDir, setDetectedInputDir] = useState<string | null>(data.detectedInputDir);
-  const [detectedOutputDir, setDetectedOutputDir] = useState<string | null>(data.detectedOutputDir);
-  const [detectedInput3dDir, setDetectedInput3dDir] = useState<string | null>(data.detectedInput3dDir);
+  const { modelUrl, videoUrl, videoName, progressText, errorMessage, promptId } = data;
+  const comfyStatus = data.comfyStatus || 'idle';
   const [comfyInput3dDir, setComfyInput3dDir] = useState<string>(data.comfyInput3dDir || '');
-  const [seedancePackStatus, setSeedancePackStatus] = useState<SeedancePackStatusResult | null>(null);
-  const [seedanceInstalling, setSeedanceInstalling] = useState(false);
-  const [seedanceMessage, setSeedanceMessage] = useState<string | null>(null);
+  const [presetMessage, setPresetMessage] = useState<string | null>(null);
+  const [explicitAddress, setExplicitAddress] = useState(false);
   const publishedComfyAssetKeyRef = useRef(data.comfyStatus === 'done' && data.videoUrl ? data.videoUrl : null);
 
   const [comfyUrl, setComfyUrl] = useState(data.comfyUrl || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl);
+  const { service, refresh: refreshComfyStatus, installSeedancePack,
+    seedancePackStatus, seedanceInstalling, seedanceMessage } = useComfyServiceStatus({
+      comfyUrl, explicitAddress: explicitAddress || comfyUrl !== DEFAULT_COMFY_VIDEO_PRESET.comfyUrl,
+    });
+  const refreshSeedancePackStatus = refreshComfyStatus;
+  const comfyOnline = service.status === 'connected';
+  const comfyVersion = service.probe?.version;
+  const detectedInputDir = service.probe?.detectedInputDir;
+  const detectedOutputDir = service.probe?.detectedOutputDir;
+  const detectedInput3dDir = service.probe?.detectedInput3dDir;
+
   const [prompt, setPrompt] = useState(data.prompt || DEFAULT_COMFY_VIDEO_PRESET.prompt);
   const [videoResolution, setVideoResolution] = useState(data.videoResolution || DEFAULT_COMFY_VIDEO_PRESET.videoResolution);
   const [ratio, setRatio] = useState(data.ratio || DEFAULT_COMFY_VIDEO_PRESET.ratio);
@@ -2283,18 +2270,6 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
   const [renderEngine, setRenderEngine] = useState(data.renderEngine || DEFAULT_COMFY_VIDEO_PRESET.renderEngine);
   const [forceRender, setForceRender] = useState(data.forceRender ?? DEFAULT_COMFY_VIDEO_PRESET.forceRender);
 
-  useEffect(() => { setModelUrl(data.modelUrl); }, [data.modelUrl]);
-  useEffect(() => { setVideoUrl(data.videoUrl); }, [data.videoUrl]);
-  useEffect(() => { setVideoName(data.videoName); }, [data.videoName]);
-  useEffect(() => { setComfyStatus(data.comfyStatus || 'idle'); }, [data.comfyStatus]);
-  useEffect(() => { setProgressText(data.progressText); }, [data.progressText]);
-  useEffect(() => { setErrorMessage(data.errorMessage); }, [data.errorMessage]);
-  useEffect(() => { setPromptId(data.promptId); }, [data.promptId]);
-  useEffect(() => { setComfyOnline(data.comfyOnline); }, [data.comfyOnline]);
-  useEffect(() => { setComfyVersion(data.comfyVersion); }, [data.comfyVersion]);
-  useEffect(() => { setDetectedInputDir(data.detectedInputDir); }, [data.detectedInputDir]);
-  useEffect(() => { setDetectedOutputDir(data.detectedOutputDir); }, [data.detectedOutputDir]);
-  useEffect(() => { setDetectedInput3dDir(data.detectedInput3dDir); }, [data.detectedInput3dDir]);
   useEffect(() => { setComfyInput3dDir(data.comfyInput3dDir || ''); }, [data.comfyInput3dDir]);
 
   const handleDelete = useCallback(() => {
@@ -2382,130 +2357,12 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
       .then((result) => {
         if (!result.success) throw new Error(result.error || 'Preset sync failed');
         applyPreset(result.preset as ComfyVideoPreset);
-        setErrorMessage(null);
+        setPresetMessage(null);
       })
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Preset sync failed';
-        setErrorMessage(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id ? { ...n, data: { ...n.data, errorMessage: message, comfyStatus: 'error' as const } } : n
-          )
-        );
+        setPresetMessage(err instanceof Error ? err.message : 'Preset sync failed');
       });
-  }, [applyPreset, id, setNodes]);
-
-  const updateRunState = useCallback((updates: Partial<ComfyVideoNodeData['data']>) => {
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...updates } } : n))
-    );
-  }, [id, setNodes]);
-
-  const refreshSeedancePackStatus = useCallback(() => {
-    const params = new URLSearchParams({ comfyUrl: comfyUrl.trim() || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl });
-    return fetch(`/api/comfy-seedance-status?${params.toString()}`)
-      .then((res) => res.json())
-      .then((result: SeedancePackStatusResult) => {
-        setSeedancePackStatus(result);
-        if (result.success === false && typeof result.error === 'string') {
-          setSeedanceMessage(result.error);
-        } else if (result.ready) {
-          setSeedanceMessage(null);
-        }
-        return result;
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Seedance pack status check failed';
-        const result: SeedancePackStatusResult = { success: false, error: message };
-        setSeedancePackStatus(result);
-        setSeedanceMessage(message);
-        return result;
-      });
-  }, [comfyUrl]);
-
-  const refreshComfyStatus = useCallback(() => {
-    const params = new URLSearchParams({ comfyUrl: comfyUrl.trim() || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl });
-    fetch(`/api/comfy-video-status?${params.toString()}`)
-      .then((res) => res.json())
-      .then((result) => {
-        const online = result.online === true;
-        const nextVersion = typeof result.version === 'string' ? result.version : null;
-        const nextInputDir = typeof result.detectedInputDir === 'string' ? result.detectedInputDir : null;
-        const nextOutputDir = typeof result.detectedOutputDir === 'string' ? result.detectedOutputDir : null;
-        const nextInput3dDir = typeof result.detectedInput3dDir === 'string' ? result.detectedInput3dDir : null;
-        const nextError = online ? null : (typeof result.error === 'string' ? result.error : 'ComfyUI disconnected');
-        const nextComfyStatus = online && comfyStatus === 'error' && !videoUrl ? 'idle' : online ? comfyStatus : 'error';
-
-        setComfyOnline(online);
-        setComfyVersion(nextVersion);
-        setDetectedInputDir(nextInputDir);
-        setDetectedOutputDir(nextOutputDir);
-        setDetectedInput3dDir(nextInput3dDir);
-        setErrorMessage(nextError);
-        setComfyStatus(nextComfyStatus);
-        if (online) {
-          void refreshSeedancePackStatus();
-        } else {
-          setSeedancePackStatus(null);
-          setSeedanceMessage(null);
-        }
-
-        updateRunState({
-          comfyOnline: online,
-          comfyVersion: nextVersion,
-          detectedInputDir: nextInputDir,
-          detectedOutputDir: nextOutputDir,
-          detectedInput3dDir: nextInput3dDir,
-          errorMessage: nextError,
-          comfyStatus: nextComfyStatus,
-        });
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'ComfyUI status check failed';
-        setComfyOnline(false);
-        setErrorMessage(message);
-        updateRunState({
-          comfyOnline: false,
-          comfyVersion: null,
-          detectedInputDir: null,
-          detectedOutputDir: null,
-          detectedInput3dDir: null,
-          errorMessage: message,
-          comfyStatus: 'error',
-        });
-        setSeedancePackStatus(null);
-        setSeedanceMessage(null);
-      });
-  }, [comfyStatus, comfyUrl, refreshSeedancePackStatus, updateRunState, videoUrl]);
-
-  const installSeedancePack = useCallback(() => {
-    setSeedanceInstalling(true);
-    setSeedanceMessage(null);
-    fetch('/api/install-comfy-seedance-pack', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comfyUrl: comfyUrl.trim() || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          throw new Error(typeof result.error === 'string' ? result.error : 'Seedance pack installation failed');
-        }
-        setSeedanceMessage(result.restartRequired ? 'Installed. Restart ComfyUI, then Check again.' : 'Seedance pack already installed.');
-        return refreshSeedancePackStatus();
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Seedance pack installation failed';
-        setSeedanceMessage(message);
-      })
-      .finally(() => {
-        setSeedanceInstalling(false);
-      });
-  }, [comfyUrl, refreshSeedancePackStatus]);
-
-  useEffect(() => {
-    refreshComfyStatus();
-  }, [refreshComfyStatus]);
+  }, [applyPreset]);
 
   useEffect(() => {
     if (comfyStatus !== 'done' || !videoUrl || publishedComfyAssetKeyRef.current === videoUrl) return;
@@ -2520,27 +2377,14 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
   }, [comfyStatus, videoName, videoUrl]);
 
   const handleGenerate = useCallback(() => {
-    const inputModelUrl = modelUrl;
-    if (!inputModelUrl || isBlobUrl(inputModelUrl)) {
-      const message = 'Model file unavailable, please wait for upload';
-      setErrorMessage(message);
-      updateRunState({ errorMessage: message, comfyStatus: 'error' });
-      return;
-    }
-    if (seedancePackStatus && seedancePackStatus.ready === false) {
-      const message = 'Seedance ComfyUI pack is missing or ComfyUI needs restart. Install it and check again before generating.';
-      setErrorMessage(message);
-      updateRunState({ errorMessage: message, comfyStatus: 'error' });
-      return;
-    }
     commitSettings(collectSettings());
     void runSingleNode(id);
-  }, [collectSettings, commitSettings, id, modelUrl, runSingleNode, seedancePackStatus, updateRunState]);
+  }, [collectSettings, commitSettings, id, runSingleNode]);
 
   const visualStatus: NodeVisualStatus =
     comfyStatus === 'processing' ? 'processing' : comfyStatus === 'done' ? 'done' : comfyStatus === 'error' ? 'error' : 'idle';
   const effectiveInput3dDir = comfyInput3dDir.trim() || detectedInput3dDir;
-  const connectionLabel = comfyOnline === true ? 'connected' : comfyOnline === false ? 'disconnected' : 'checking';
+  const connectionLabel = COMFY_SERVICE_LABELS[service.status];
   const seedanceReady = seedancePackStatus?.ready === true;
   const seedanceInstalled = seedancePackStatus?.installed === true;
   const seedanceLoaded = seedancePackStatus?.loaded === true;
@@ -2548,8 +2392,8 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
     ? seedanceInstalled ? 'ready' : 'ready, workflow missing'
     : seedancePackStatus
       ? seedanceInstalled && !seedanceLoaded
-        ? 'restart needed'
-        : 'missing'
+        ? '待配置 · 需要重启'
+        : seedancePackStatus.success === false ? '检查失败' : '待配置'
       : 'unchecked';
   const missingSeedanceItems = [
     ...(seedancePackStatus?.missingCustomNodeFolders || []),
@@ -2596,11 +2440,17 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
           </div>
         </PreviewBox>
 
+        {service.status !== 'connected' && (
+          <p className="text-[10px] text-zinc-400">{COMFY_SERVICE_HINTS[service.status]}</p>
+        )}
+        {presetMessage && <p className="text-[10px] text-amber-300/80">{presetMessage}</p>}
+
         <label className="block space-y-1">
           <span className="text-[10px] text-zinc-400">ComfyUI URL</span>
           <input
             value={comfyUrl}
             onChange={(event) => {
+              setExplicitAddress(true);
               setComfyUrl(event.target.value);
               commitSettings({ comfyUrl: event.target.value });
             }}
@@ -2612,12 +2462,12 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
           <summary className="cursor-pointer">
             <span className="ml-1 inline-flex w-[calc(100%-1rem)] items-center justify-between gap-2 align-middle">
               <span>
-                ComfyUI: <span className={comfyOnline ? 'text-[#bde6ce]' : 'text-[#8a5a5a]'}>{connectionLabel}</span>
+                ComfyUI: <span className={comfyOnline ? 'text-[#bde6ce]' : 'text-zinc-400'}>{connectionLabel}</span>
                 {comfyVersion ? <span className="text-zinc-500"> · {comfyVersion}</span> : null}
               </span>
               <button
                 type="button"
-                onClick={(event) => { event.preventDefault(); event.stopPropagation(); refreshComfyStatus(); }}
+                onClick={(event) => { event.preventDefault(); event.stopPropagation(); void refreshComfyStatus(); }}
                 className="nodrag rounded border border-zinc-700 px-1.5 py-0.5 text-[9px] text-zinc-300 hover:bg-zinc-800"
               >
                 Check
@@ -2625,6 +2475,7 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
             </span>
           </summary>
           <div className="mt-2 space-y-0.5">
+            {service.detail && <p className="break-words text-zinc-500">{service.detail}</p>}
             <div className="truncate text-zinc-500" title={effectiveInput3dDir || undefined}>
               Input/3D: {effectiveInput3dDir || 'Not detected'}
             </div>
@@ -2660,7 +2511,7 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
                 {!seedanceInstalled && (
                   <button
                     type="button"
-                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); installSeedancePack(); }}
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); void installSeedancePack(); }}
                     disabled={comfyOnline !== true || seedanceInstalling}
                     className="nodrag rounded border border-[#5f8f74]/60 bg-[#5f8f74]/20 px-1.5 py-0.5 text-[9px] text-[#bde6ce] hover:bg-[#5f8f74]/30 disabled:cursor-not-allowed disabled:opacity-50"
                   >

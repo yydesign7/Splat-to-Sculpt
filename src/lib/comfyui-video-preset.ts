@@ -83,8 +83,6 @@ export function buildDefaultComfyVideoNodeData(): Record<string, unknown> {
     detectedInputDir: null,
     detectedOutputDir: null,
     detectedInput3dDir: null,
-    comfyOnline: null,
-    comfyVersion: null,
     ...DEFAULT_COMFY_VIDEO_PRESET,
   };
 }
