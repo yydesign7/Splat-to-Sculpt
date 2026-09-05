@@ -3,13 +3,13 @@ import test from 'node:test';
 
 import { selectModelCleanupMode } from './model-cleanup-mode';
 
-test('cleans the main model when both main model and layer files are available', () => {
+test('cleans layer files when both main model and layer files are available', () => {
   assert.equal(
     selectModelCleanupMode({
       modelUrl: '/api/ephemeral-file?sid=s&rel=meshes/mesh.glb',
       layerGlbUrls: ['/api/ephemeral-file?sid=s&rel=layers/layer_000.glb'],
     }),
-    'single',
+    'layers',
   );
 });
 

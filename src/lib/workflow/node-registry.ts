@@ -1,8 +1,12 @@
 import type { Node } from '@xyflow/react';
 import { inferModelTypeFromUrl } from '@/lib/infer-model-type-from-url';
+import { executeComfyVideo } from './executors/comfy-video';
 import { executeFrameExtraction } from './executors/frame-extraction';
 import { executeGaussianSplat } from './executors/gaussian-splat';
 import { executeMeshGeneration } from './executors/mesh-generation';
+import { executeModelCleanup } from './executors/model-cleanup';
+import { executeSurfaceProcessing } from './executors/surface-processing';
+import { executeVideoPreview } from './executors/video-preview';
 import { createNodeDefaultData } from './node-data';
 import type {
   NodeCompletion,
@@ -252,6 +256,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       ...copyMetadata(packet.metadata, ['layerNames', 'layerGlbUrls']),
     }),
     resetData: resetWithPreservedNote,
+    executor: executeModelCleanup,
   },
   modelSurface: {
     type: 'modelSurface',
@@ -285,6 +290,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       ...copyMetadata(packet.metadata, ['layerNames', 'layerGlbUrls']),
     }),
     resetData: resetWithPreservedNote,
+    executor: executeSurfaceProcessing,
   },
   comfyVideo: {
     type: 'comfyVideo',
@@ -313,6 +319,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       ...copyMetadata(packet.metadata, ['lightParams']),
     }),
     resetData: resetWithPreservedNote,
+    executor: executeComfyVideo,
   },
   videoPreview: {
     type: 'videoPreview',
@@ -359,6 +366,7 @@ export const WORKFLOW_NODE_REGISTRY = {
       return {};
     },
     resetData: resetWithPreservedNote,
+    executor: executeVideoPreview,
   },
   stickyNote: {
     type: 'stickyNote',
