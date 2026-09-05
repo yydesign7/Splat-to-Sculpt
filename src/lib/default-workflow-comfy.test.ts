@@ -1,8 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { Edge, Node } from '@xyflow/react';
 import { initialEdges, initialNodes } from './default-workflow';
-import { computeDownstreamPushes } from './workflow-engine';
+import { getWorkflowNodeDefinition } from './workflow/node-registry';
+
+function applyRegistryPush(sourceNode: Node, edge: Edge, targetNode: Node): Record<string, unknown> | null {
+  const sourceDefinition = getWorkflowNodeDefinition(sourceNode.type);
+  const targetDefinition = getWorkflowNodeDefinition(targetNode.type);
+  if (!sourceDefinition || !targetDefinition) return null;
+  const packet = sourceDefinition.readOutput(sourceNode, edge.sourceHandle ?? '');
+  if (!packet) return null;
+  return targetDefinition.applyInput(targetNode, edge.targetHandle ?? '', packet);
+}
 
 test('default workflow routes Surface Processing directly into ComfyUI Video Gen', () => {
   const comfyNode = initialNodes.find((node) => node.type === 'comfyVideo');
@@ -40,8 +50,8 @@ test('default workflow routes Surface Processing directly into ComfyUI Video Gen
   );
 });
 
-test('workflow engine pushes Surface Processing output to ComfyUI Video Gen', () => {
-  const sourceNode = {
+test('workflow registry routes Surface Processing output to ComfyUI Video Gen', () => {
+  const sourceNode: Node = {
     id: 'surface-1',
     type: 'modelSurface',
     position: { x: 0, y: 0 },
@@ -50,34 +60,22 @@ test('workflow engine pushes Surface Processing output to ComfyUI Video Gen', ()
       lightParams: { exposure: 1.2 },
     },
   };
-  const targetNode = {
+  const targetNode: Node = {
     id: 'comfy-1',
     type: 'comfyVideo',
     position: { x: 0, y: 0 },
     data: {},
   };
+  const edge: Edge = {
+    id: 'edge-1',
+    source: 'surface-1',
+    sourceHandle: 'obj-output',
+    target: 'comfy-1',
+    targetHandle: 'model-input',
+  };
 
-  const pushes = computeDownstreamPushes(
-    sourceNode,
-    [
-      {
-        id: 'edge-1',
-        source: 'surface-1',
-        sourceHandle: 'obj-output',
-        target: 'comfy-1',
-        targetHandle: 'model-input',
-      },
-    ],
-    [sourceNode, targetNode],
-  );
-
-  assert.deepEqual(pushes, [
-    {
-      targetNodeId: 'comfy-1',
-      updates: {
-        modelUrl: '/api/ephemeral-file?sid=s1&rel=surface/final.glb',
-        lightParams: { exposure: 1.2 },
-      },
-    },
-  ]);
+  assert.deepEqual(applyRegistryPush(sourceNode, edge, targetNode), {
+    modelUrl: '/api/ephemeral-file?sid=s1&rel=surface/final.glb',
+    lightParams: { exposure: 1.2 },
+  });
 });

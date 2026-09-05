@@ -3,7 +3,8 @@ import test from 'node:test';
 
 import type { Edge, Node } from '@xyflow/react';
 import { NODE_TYPE_CONFIGS } from './node-config';
-import { computeDownstreamPushes, getNodeTriggerInfo } from './workflow-engine';
+import { compileWorkflowGraph } from './workflow/graph-compiler';
+import { getWorkflowNodeDefinition } from './workflow/node-registry';
 
 test('Material Gen is no longer a registered or executable node type', () => {
   const legacyMaterialNode: Node = {
@@ -29,11 +30,15 @@ test('Material Gen is no longer a registered or executable node type', () => {
   ];
 
   assert.equal(NODE_TYPE_CONFIGS.some((config) => config.type === 'material'), false);
-  assert.deepEqual(getNodeTriggerInfo(legacyMaterialNode, edges), {
-    canTrigger: false,
-    reason: 'Unknown node type',
-    requiredInputs: [],
-    satisfiedInputs: [],
+  assert.equal(getWorkflowNodeDefinition(legacyMaterialNode.type), null);
+  assert.deepEqual(compileWorkflowGraph([legacyMaterialNode, targetNode], edges), {
+    ok: false,
+    diagnostics: [
+      {
+        code: 'UNKNOWN_NODE_TYPE',
+        message: 'Unknown node type "material"',
+        nodeId: 'material',
+      },
+    ],
   });
-  assert.deepEqual(computeDownstreamPushes(legacyMaterialNode, edges, [legacyMaterialNode, targetNode]), []);
 });

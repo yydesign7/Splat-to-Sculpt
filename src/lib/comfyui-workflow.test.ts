@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { Edge, Node } from '@xyflow/react';
 import {
   buildComfyVideoPrompt,
   detectComfyFoldersFromSystemStats,
@@ -8,7 +9,17 @@ import {
   findComfyVideoOutput,
   resolveComfyInput3dDirectory,
 } from './comfyui-workflow';
-import { computeDownstreamPushes, getNodeTriggerInfo, isNodeDone } from './workflow-engine';
+import { compileWorkflowGraph } from './workflow/graph-compiler';
+import { getWorkflowNodeDefinition } from './workflow/node-registry';
+
+function applyRegistryPush(sourceNode: Node, edge: Edge, targetNode: Node): Record<string, unknown> | null {
+  const sourceDefinition = getWorkflowNodeDefinition(sourceNode.type);
+  const targetDefinition = getWorkflowNodeDefinition(targetNode.type);
+  if (!sourceDefinition || !targetDefinition) return null;
+  const packet = sourceDefinition.readOutput(sourceNode, edge.sourceHandle ?? '');
+  if (!packet) return null;
+  return targetDefinition.applyInput(targetNode, edge.targetHandle ?? '', packet);
+}
 
 const apiWorkflow = {
   '1': {
@@ -99,8 +110,8 @@ test('buildComfyVideoPrompt replaces model and node parameters without removing 
   assert.deepEqual(prompt['3'].inputs.video, ['2', 0]);
 });
 
-test('workflow engine pushes ComfyUI video output to Video Preview', () => {
-  const sourceNode = {
+test('workflow registry routes ComfyUI video output to Video Preview', () => {
+  const sourceNode: Node = {
     id: 'comfy-1',
     type: 'comfyVideo',
     position: { x: 0, y: 0 },
@@ -110,32 +121,28 @@ test('workflow engine pushes ComfyUI video output to Video Preview', () => {
       comfyStatus: 'done',
     },
   };
-  const targetNode = {
+  const targetNode: Node = {
     id: 'preview-1',
     type: 'videoPreview',
     position: { x: 0, y: 0 },
     data: {},
   };
+  const edge: Edge = {
+    id: 'edge-1',
+    source: 'comfy-1',
+    sourceHandle: 'video-output',
+    target: 'preview-1',
+    targetHandle: 'video-input',
+  };
 
-  const pushes = computeDownstreamPushes(
-    sourceNode,
-    [{ id: 'edge-1', source: 'comfy-1', sourceHandle: 'video-output', target: 'preview-1', targetHandle: 'video-input' }],
-    [sourceNode, targetNode],
-  );
-
-  assert.deepEqual(pushes, [
-    {
-      targetNodeId: 'preview-1',
-      updates: {
-        videoUrl: '/api/ephemeral-file?sid=s1&rel=comfy-videos/out.mp4',
-        videoName: 'ComfyUI Video',
-      },
-    },
-  ]);
+  assert.deepEqual(applyRegistryPush(sourceNode, edge, targetNode), {
+    videoUrl: '/api/ephemeral-file?sid=s1&rel=comfy-videos/out.mp4',
+    videoName: 'ComfyUI Video',
+  });
 });
 
-test('workflow engine treats ComfyUI Video Gen as model-driven processing node', () => {
-  const node = {
+test('workflow registry treats ComfyUI Video Gen as model-driven processing node', () => {
+  const node: Node = {
     id: 'comfy-1',
     type: 'comfyVideo',
     position: { x: 0, y: 0 },
@@ -145,17 +152,29 @@ test('workflow engine treats ComfyUI Video Gen as model-driven processing node',
       videoUrl: '/api/ephemeral-file?sid=s1&rel=comfy-videos/out.mp4',
     },
   };
+  const edges: Edge[] = [
+    { id: 'edge-1', source: 'mesh-1', sourceHandle: 'obj-output', target: 'comfy-1', targetHandle: 'model-input' },
+  ];
+  const sourceNode: Node = {
+    id: 'mesh-1',
+    type: 'modelSurface',
+    position: { x: 0, y: 0 },
+    data: { outputModelUrl: '/api/ephemeral-file?sid=s1&rel=surface/final.glb' },
+  };
+  const compiled = compileWorkflowGraph([sourceNode, node], edges);
+  assert.equal(compiled.ok, true);
+  if (!compiled.ok) return;
+  const definition = getWorkflowNodeDefinition(node.type);
+  assert.ok(definition);
 
   assert.deepEqual(
-    getNodeTriggerInfo(node, [{ id: 'edge-1', source: 'mesh-1', target: 'comfy-1', targetHandle: 'model-input' }]),
+    definition.getReadiness(node, compiled.graph),
     {
-      canTrigger: true,
       reason: 'Model data ready',
-      requiredInputs: ['model'],
-      satisfiedInputs: ['model'],
+      ready: true,
     },
   );
-  assert.equal(isNodeDone(node), true);
+  assert.equal(definition.getCompletion(node).complete, true);
 });
 
 test('findComfyVideoOutput returns SaveVideo result from ComfyUI history', () => {

@@ -6,6 +6,7 @@ export interface WorkflowContextValue {
   /** Whether the workflow is currently in "run" mode — nodes should auto-trigger when inputs are ready */
   workflowRunning: boolean;
   setWorkflowRunning: (running: boolean) => void;
+  runSingleNode: (nodeId: string) => Promise<void>;
   /**
    * Browser tab session for ephemeral workflow files. Null only before first mount completes.
    */
@@ -19,6 +20,7 @@ const rejectFetch = () => Promise.reject(new Error('Workflow session not ready')
 const WorkflowContext = createContext<WorkflowContextValue>({
   workflowRunning: false,
   setWorkflowRunning: () => {},
+  runSingleNode: async () => {},
   ephemeralSessionId: null,
   apiFetch: rejectFetch,
 });

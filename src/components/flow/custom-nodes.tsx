@@ -5,7 +5,6 @@ import { Handle, Position, useReactFlow, type NodeProps, type Node } from '@xyfl
 import { X, Upload, FolderOpen, Maximize2, MonitorPlay, Video, Film, Box, Check, RotateCcw, StickyNote, Download, Sparkles, Orbit, Brush, Eraser } from 'lucide-react';
 import { getNodeConfig, getNodeVisualTheme, NODE_WIDTH, VIDEO_PREVIEW_NODE_WIDTH } from '@/lib/node-config';
 import { mergeLayerGlbsInBrowser, isGltfLikeUrl, type LayerGlbEntry } from '@/lib/browser-merge-glb';
-import { GAUSSIAN_TASK_MAX_POLL_ATTEMPTS, GAUSSIAN_TASK_POLL_INTERVAL_MS } from '@/lib/gaussian-task-polling';
 import { inferModelTypeFromUrl as inferModelType } from '@/lib/infer-model-type-from-url';
 import { selectMeshGenerationAssetCandidate } from '@/lib/mesh-asset-publish-policy';
 import { selectModelCleanupMode } from '@/lib/model-cleanup-mode';
@@ -103,59 +102,6 @@ function drawCroppedImageToCanvas(
 
   ctx.drawImage(image, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
   return canvas;
-}
-
-/** Poll /api/gaussian-status until a generate-gaussian-splat task finishes */
-async function waitForGaussianTask(
-  taskId: string,
-  fetchImpl: typeof fetch = fetch,
-  onProgress?: (task: {
-    progress?: string;
-    progressStep?: number;
-    deviceType?: GaussianDeviceType;
-    computeBackend?: string;
-    trainingMode?: GaussianTrainingMode;
-    targetPlyType?: string;
-    trueTrainingAvailable?: boolean;
-    trueTrainingUnavailableReason?: string;
-    currentTrainingIteration?: number;
-    maxTrainingIterations?: number;
-  }) => void,
-): Promise<{ splatUrl: string; sourcePlyUrl: string; gaussianCount: number; format: '3dgs-ply'; deviceType?: GaussianDeviceType; computeBackend?: string; trainingMode?: GaussianTrainingMode; targetPlyType?: string }> {
-  for (let attempt = 0; attempt < GAUSSIAN_TASK_MAX_POLL_ATTEMPTS; attempt++) {
-    const r = await fetchImpl(`/api/gaussian-status?taskId=${encodeURIComponent(taskId)}`);
-    const task = await r.json();
-    if (task.status === 'processing') {
-      onProgress?.({
-        progress: task.progress,
-        progressStep: typeof task.progressStep === 'number' ? task.progressStep : undefined,
-        deviceType: normalizeGaussianDeviceType(task.deviceType) ?? undefined,
-        computeBackend: typeof task.computeBackend === 'string' ? task.computeBackend : undefined,
-        trainingMode: normalizeGaussianTrainingMode(task.trainingMode),
-        targetPlyType: typeof task.targetPlyType === 'string' ? task.targetPlyType : undefined,
-        trueTrainingAvailable:
-          typeof task.trueTrainingAvailable === 'boolean' ? task.trueTrainingAvailable : undefined,
-        trueTrainingUnavailableReason:
-          typeof task.trueTrainingUnavailableReason === 'string' ? task.trueTrainingUnavailableReason : undefined,
-        currentTrainingIteration:
-          typeof task.currentTrainingIteration === 'number' ? task.currentTrainingIteration : undefined,
-        maxTrainingIterations:
-          typeof task.maxTrainingIterations === 'number' ? task.maxTrainingIterations : undefined,
-      });
-    }
-    if (task.status === 'done' && task.result) {
-      return {
-        ...task.result,
-        deviceType: normalizeGaussianDeviceType(task.deviceType) ?? undefined,
-        trainingMode: normalizeGaussianTrainingMode(task.trainingMode),
-        targetPlyType: typeof task.targetPlyType === 'string' ? task.targetPlyType : undefined,
-      };
-    }
-    if (task.status === 'cancelled') throw new Error('Gaussian splat generation stopped');
-    if (task.status === 'error') throw new Error(task.error || 'Gaussian splat generation failed');
-    await new Promise((res) => setTimeout(res, GAUSSIAN_TASK_POLL_INTERVAL_MS));
-  }
-  throw new Error('Gaussian splat task timeout');
 }
 
 function sanitizeLabelForFilename(label: string): string {
@@ -421,20 +367,6 @@ function buildLayerUrlMap(layerGlbUrls: string[], layerNames: string[]): Record<
     m[name] = url;
   });
   return m;
-}
-
-function orderedLayerGlbEntries(
-  layerGlbUrls: string[],
-  layerNames: string[],
-  layerUrlA: Record<string, string>,
-): LayerGlbEntry[] {
-  const urlA =
-    Object.keys(layerUrlA).length > 0 ? layerUrlA : buildLayerUrlMap(layerGlbUrls, layerNames);
-  const order =
-    layerNames.length > 0
-      ? layerNames.filter((n) => urlA[n])
-      : Object.keys(urlA).sort();
-  return order.map((layerName) => ({ layerName, url: urlA[layerName] }));
 }
 
 /** Browser merge preview: prefer Blender per-layer GLB (url_b), else url_a — mirrors sendToBlender mergePaths. */
@@ -851,7 +783,7 @@ export function StickyNoteNode({ id, data }: NodeProps<StickyNoteNodeData>) {
    ==================================================================== */
 export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
   const { apiFetch } = useWorkflow();
-  const { setNodes, getEdges } = useReactFlow();
+  const { setNodes } = useReactFlow();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [localCover, setLocalCover] = useState<string | null>(data.coverUrl);
   const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(data.videoUrl);
@@ -886,22 +818,14 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
       const val = parseInt(e.target.value, 10);
       if (!isNaN(val) && val >= 1 && val <= 300) {
         setTargetFrameCount(val);
-        setNodes((nds) => {
-          const withVideo = nds.map((n) =>
+        setNodes((nds) =>
+          nds.map((n) =>
             n.id === id ? { ...n, data: { ...n.data, targetFrameCount: val } } : n
-          );
-          const edges = getEdges();
-          const downstreamEdge = edges.find((edge) => edge.source === id);
-          if (!downstreamEdge) return withVideo;
-          return withVideo.map((n) =>
-            n.id === downstreamEdge.target && n.type === 'frameExtraction'
-              ? { ...n, data: { ...n.data, targetFrameCount: val } }
-              : n
-          );
-        });
+          )
+        );
       }
     },
-    [id, setNodes, getEdges]
+    [id, setNodes]
   );
 
   const handleFileChange = useCallback(
@@ -1039,9 +963,8 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
           });
           const publishedVideoServerPath = resolveUploadedVideoServerPath(videoServerPath, assetResponse);
 
-          // Update this node and push videoServerPath (+ frame count) to downstream FrameExtractionNode
-          setNodes((nds) => {
-            const updated = nds.map((n) =>
+          setNodes((nds) =>
+            nds.map((n) =>
               n.id === id
                 ? {
                     ...n,
@@ -1053,35 +976,8 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
                     },
                   }
                 : n
-            );
-
-            const videoNode = updated.find((n) => n.id === id);
-            const tfcRaw =
-              videoNode?.data && typeof videoNode.data === 'object' && 'targetFrameCount' in videoNode.data
-                ? (videoNode.data as { targetFrameCount?: number }).targetFrameCount
-                : undefined;
-            const tfc =
-              typeof tfcRaw === 'number' && tfcRaw >= 1 && tfcRaw <= 300 ? tfcRaw : 120;
-
-            const edges = getEdges();
-            const downstreamEdge = edges.find((edge) => edge.source === id);
-            if (downstreamEdge) {
-              const targetId = downstreamEdge.target;
-              return updated.map((n) =>
-                n.id === targetId
-                  ? {
-                      ...n,
-                      data: {
-                        ...n.data,
-                        videoServerPath: publishedVideoServerPath,
-                        targetFrameCount: tfc,
-                      },
-                    }
-                  : n
-              );
-            }
-            return updated;
-          });
+            )
+          );
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : 'Network request failed';
@@ -1096,7 +992,7 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
           );
         });
     },
-    [id, setNodes, getEdges, apiFetch]
+    [id, setNodes, apiFetch]
   );
 
   const handleClearVideo = useCallback(() => {
@@ -1219,10 +1115,14 @@ export function VideoUploadNode({ id, data }: NodeProps<VideoUploadNodeData>) {
    ==================================================================== */
 export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeData>) {
   const { setNodes, getEdges, getNodes } = useReactFlow();
-  const { workflowRunning, apiFetch } = useWorkflow();
+  const { apiFetch, runSingleNode } = useWorkflow();
   const [localFrames, setLocalFrames] = useState<string[]>(data.frames || []);
   const [status, setStatus] = useState<'idle' | 'extracting' | 'done' | 'error'>(data.status || 'idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
+
+  useEffect(() => { setLocalFrames(data.frames || []); }, [data.frames]);
+  useEffect(() => { setStatus(data.status || 'idle'); }, [data.status]);
+  useEffect(() => { setErrorMessage(data.errorMessage); }, [data.errorMessage]);
 
   const resolveFrameCount = useCallback((): number => {
     const edges = getEdges();
@@ -1241,85 +1141,11 @@ export function FrameExtractionNode({ id, data }: NodeProps<FrameExtractionNodeD
     return 120;
   }, [id, getEdges, getNodes, data.targetFrameCount]);
 
-  // Auto-trigger frame extraction when workflow is running and video is ready
-  useEffect(() => {
-    if (workflowRunning && data.videoServerPath && status === 'idle') {
-      handleExtractFrames();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowRunning, data.videoServerPath]);
-
   const handleExtractFrames = useCallback(() => {
     if (!data.videoServerPath) return;
-
-    const frameCount = resolveFrameCount();
-
-    setStatus('extracting');
-    setErrorMessage(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, status: 'extracting', errorMessage: null } }
-          : n
-      )
-    );
-
-    apiFetch('/api/extract-frames', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ videoPath: data.videoServerPath, frameCount }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          setStatus('error');
-          setErrorMessage(result.error || 'Frame extraction failed');
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, status: 'error', errorMessage: result.error || 'Frame extraction failed' } }
-                : n
-            )
-          );
-          return;
-        }
-
-        const { frames, outputFolder, frameCount } = result;
-        setLocalFrames(frames);
-        setStatus('done');
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    frames,
-                    outputFolder,
-                    frameCount,
-                    targetFrameCount: frameCount,
-                    status: 'done',
-                    errorMessage: null,
-                  },
-                }
-              : n
-          )
-        );
-
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Frame extraction request failed';
-        setStatus('error');
-        setErrorMessage(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, status: 'error', errorMessage: message } }
-              : n
-          )
-        );
-      });
-  }, [id, data.videoServerPath, resolveFrameCount, setNodes, apiFetch]);
+    void resolveFrameCount();
+    void runSingleNode(id);
+  }, [id, data.videoServerPath, resolveFrameCount, runSingleNode]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -1484,7 +1310,7 @@ function GaussianPipelineSteps({ currentStep }: { currentStep: number }) {
    ==================================================================== */
 export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>) {
   const { setNodes } = useReactFlow();
-  const { workflowRunning, apiFetch, ephemeralSessionId } = useWorkflow();
+  const { apiFetch, ephemeralSessionId } = useWorkflow();
   const plyFileInputRef = useRef<HTMLInputElement>(null);
   const [framePaths, setFramePaths] = useState<string[]>(data.framePaths || []);
   const [sourcePlyUrl, setSourcePlyUrl] = useState<string | null>(data.sourcePlyUrl);
@@ -1513,9 +1339,7 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [plyUploading, setPlyUploading] = useState(false);
   const deviceDetectionStartedRef = useRef(false);
-  const cancelRequestedRef = useRef(false);
-  const previousWorkflowRunningRef = useRef(workflowRunning);
-  const activeRunIdRef = useRef<string | null>(null);
+  const publishedSplatAssetKeyRef = useRef(data.status === 'done' && data.splatUrl ? data.splatUrl : null);
 
   useEffect(() => {
     const incomingFrames = data.framePaths || [];
@@ -1634,6 +1458,25 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
   }, [trainingMode, trueTrainingAvailable, updateTrainingMode]);
 
   useEffect(() => {
+    if (status !== 'done' || !splatUrl || publishedSplatAssetKeyRef.current === splatUrl) return;
+    publishedSplatAssetKeyRef.current = splatUrl;
+    void (async () => {
+      const thumbnailUrl = await createAssetThumbnail({
+        fileUrl: splatUrl,
+        ephemeralSessionId,
+      });
+      await recordAsset({
+        name: 'Gaussian splat',
+        assetType: 'splat',
+        fileUrl: splatUrl,
+        fileType: 'splat-ply',
+        thumbnailUrl,
+        sourceNode: 'gaussianSplat',
+      });
+    })();
+  }, [ephemeralSessionId, splatUrl, status]);
+
+  useEffect(() => {
     if (!hasPlyOnlyInput || trainingMode !== 'train') return;
     updateTrainingMode('auto');
   }, [hasPlyOnlyInput, trainingMode, updateTrainingMode]);
@@ -1652,8 +1495,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     setActiveTaskId(null);
     setTrainingMode('auto');
     setTargetPlyType(null);
-    cancelRequestedRef.current = false;
-    activeRunIdRef.current = null;
     setNodes((nds) =>
       nds.map((n) =>
         n.id === id
@@ -1789,8 +1630,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
     setActiveTaskId(null);
     setComputeBackend(null);
     setTargetPlyType(null);
-    cancelRequestedRef.current = false;
-    activeRunIdRef.current = null;
     if (plyFileInputRef.current) plyFileInputRef.current.value = '';
     setNodes((nds) =>
       nds.map((n) =>
@@ -1818,320 +1657,6 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
       )
     );
   }, [id, plyUploading, setNodes, status]);
-
-  const handleGenerateSplat = useCallback(() => {
-    const hasFrames = framePaths.length > 0;
-    const hasPly = !!sourcePlyUrl;
-    if (status === 'processing' || activeRunIdRef.current) return;
-    if ((!hasFrames && !hasPly) || !ephemeralSessionId) return;
-    const requestTrainingMode: GaussianTrainingMode = hasFrames ? trainingMode : 'auto';
-
-    setStatus('processing');
-    setProgressText(hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...');
-    setProgressStep(0);
-    setErrorMessage(null);
-    setCurrentTrainingIteration(null);
-    setMaxTrainingIterations(trainingIterations);
-    setActiveTaskId(null);
-    cancelRequestedRef.current = false;
-    const runId = crypto.randomUUID();
-    activeRunIdRef.current = runId;
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? {
-              ...n,
-              data: {
-                ...n.data,
-                status: 'processing' as const,
-                progressText: hasFrames ? 'Starting reconstruction for Gaussian splat...' : 'Starting Gaussian splat generation...',
-                progressStep: 0,
-                errorMessage: null,
-                trainingMode: requestTrainingMode,
-                currentTrainingIteration: null,
-                maxTrainingIterations: trainingIterations,
-                activeTaskId: null,
-              },
-            }
-          : n
-      )
-    );
-
-    void (async () => {
-      try {
-        const startRes = await apiFetch('/api/generate-gaussian-splat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            framePaths: hasFrames ? framePaths : undefined,
-            plyUrl: hasFrames ? undefined : sourcePlyUrl,
-            trainingIterations,
-            trainingMode: requestTrainingMode,
-            ephemeralSessionId,
-          }),
-        });
-        const started = await startRes.json();
-        if (!started.success) {
-          throw new Error(started.error || 'Failed to start Gaussian splat generation');
-        }
-        const startedDeviceType = normalizeGaussianDeviceType(started.deviceType);
-        const startedTrainingMode = normalizeGaussianTrainingMode(started.trainingMode);
-        const startedTargetPlyType = typeof started.targetPlyType === 'string' ? started.targetPlyType : null;
-        const startedTrueTrainingAvailable =
-          typeof started.trueTrainingAvailable === 'boolean' ? started.trueTrainingAvailable : undefined;
-        const startedTrueTrainingUnavailableReason =
-          typeof started.trueTrainingUnavailableReason === 'string' ? started.trueTrainingUnavailableReason : null;
-        if (startedDeviceType) setDeviceType(startedDeviceType);
-        setTrainingMode(startedTrainingMode);
-        setTargetPlyType(startedTargetPlyType);
-        if (typeof startedTrueTrainingAvailable === 'boolean') setTrueTrainingAvailable(startedTrueTrainingAvailable);
-        setTrueTrainingUnavailableReason(startedTrueTrainingUnavailableReason);
-        if (activeRunIdRef.current !== runId) return;
-        if (cancelRequestedRef.current) {
-          await apiFetch('/api/cancel-gaussian-splat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ taskId: started.taskId }),
-          }).catch(() => {});
-          throw new Error('Gaussian splat generation stopped');
-        }
-        setActiveTaskId(started.taskId);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    activeTaskId: started.taskId,
-                    deviceType: startedDeviceType ?? n.data.deviceType,
-                    trainingMode: startedTrainingMode,
-                    targetPlyType: startedTargetPlyType,
-                    trueTrainingAvailable: startedTrueTrainingAvailable ?? n.data.trueTrainingAvailable,
-                    trueTrainingUnavailableReason: startedTrueTrainingUnavailableReason,
-                  },
-                }
-              : n
-          )
-        );
-
-        const result = await waitForGaussianTask(started.taskId, apiFetch, (task) => {
-          if (activeRunIdRef.current !== runId) return;
-          const nextProgress = task.progress || 'Generating splats...';
-          setProgressText(nextProgress);
-          setProgressStep(task.progressStep ?? null);
-          if (task.deviceType) setDeviceType(task.deviceType);
-          if (task.computeBackend) setComputeBackend(task.computeBackend);
-          if (task.trainingMode) setTrainingMode(task.trainingMode);
-          if (task.targetPlyType) setTargetPlyType(task.targetPlyType);
-          if (typeof task.trueTrainingAvailable === 'boolean') setTrueTrainingAvailable(task.trueTrainingAvailable);
-          if (task.trueTrainingUnavailableReason) setTrueTrainingUnavailableReason(task.trueTrainingUnavailableReason);
-          if (typeof task.currentTrainingIteration === 'number') {
-            setCurrentTrainingIteration(task.currentTrainingIteration);
-          }
-          if (typeof task.maxTrainingIterations === 'number') {
-            setMaxTrainingIterations(task.maxTrainingIterations);
-          }
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? {
-                    ...n,
-                    data: {
-                      ...n.data,
-                      progressText: nextProgress,
-                      progressStep: task.progressStep ?? null,
-                      deviceType: task.deviceType ?? n.data.deviceType,
-                      computeBackend: task.computeBackend ?? n.data.computeBackend,
-                      trainingMode: task.trainingMode ?? n.data.trainingMode,
-                      targetPlyType: task.targetPlyType ?? n.data.targetPlyType,
-                      trueTrainingAvailable: task.trueTrainingAvailable ?? n.data.trueTrainingAvailable,
-                      trueTrainingUnavailableReason:
-                        task.trueTrainingUnavailableReason ?? n.data.trueTrainingUnavailableReason,
-                      currentTrainingIteration:
-                        typeof task.currentTrainingIteration === 'number'
-                          ? task.currentTrainingIteration
-                          : n.data.currentTrainingIteration,
-                      maxTrainingIterations:
-                        typeof task.maxTrainingIterations === 'number'
-                          ? task.maxTrainingIterations
-                          : n.data.maxTrainingIterations,
-                    },
-                  }
-                : n
-            )
-          );
-        });
-
-        if (activeRunIdRef.current !== runId) return;
-        setStatus('done');
-        setProgressText(null);
-        setProgressStep(null);
-        setErrorMessage(null);
-        setCurrentTrainingIteration(null);
-        setMaxTrainingIterations(null);
-        setActiveTaskId(null);
-        activeRunIdRef.current = null;
-        setSplatUrl(result.splatUrl);
-        setSourcePlyUrl(result.sourcePlyUrl);
-        setGaussianCount(result.gaussianCount);
-        setDeviceType(result.deviceType ?? deviceType);
-        setComputeBackend(result.computeBackend || null);
-        setTrainingMode(result.trainingMode ?? trainingMode);
-        setTargetPlyType(result.targetPlyType ?? targetPlyType);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    sourcePlyUrl: result.sourcePlyUrl,
-                    splatUrl: result.splatUrl,
-                    gaussianCount: result.gaussianCount,
-                    deviceType: result.deviceType ?? n.data.deviceType,
-                    computeBackend: result.computeBackend || null,
-                    trainingMode: result.trainingMode ?? n.data.trainingMode,
-                    targetPlyType: result.targetPlyType ?? n.data.targetPlyType,
-                    status: 'done' as const,
-                    progressText: null,
-                    progressStep: null,
-                    currentTrainingIteration: null,
-                    maxTrainingIterations: null,
-                    activeTaskId: null,
-                    errorMessage: null,
-                  },
-                }
-              : n
-          )
-        );
-        void (async () => {
-          const thumbnailUrl = await createAssetThumbnail({
-            fileUrl: result.splatUrl,
-            ephemeralSessionId,
-          });
-          await recordAsset({
-            name: 'Gaussian splat',
-            assetType: 'splat',
-            fileUrl: result.splatUrl,
-            fileType: 'splat-ply',
-            thumbnailUrl,
-            sourceNode: 'gaussianSplat',
-          });
-        })();
-      } catch (err: unknown) {
-        if (activeRunIdRef.current !== runId && !cancelRequestedRef.current) return;
-        if (cancelRequestedRef.current) {
-          setStatus('idle');
-          setProgressText('Stopped');
-          setProgressStep(null);
-          setErrorMessage(null);
-          setCurrentTrainingIteration(null);
-          setMaxTrainingIterations(null);
-          setActiveTaskId(null);
-          activeRunIdRef.current = null;
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? {
-                    ...n,
-                    data: {
-                      ...n.data,
-                      status: 'idle' as const,
-                      progressText: 'Stopped',
-                      progressStep: null,
-                      errorMessage: null,
-                      currentTrainingIteration: null,
-                      maxTrainingIterations: null,
-                      activeTaskId: null,
-                    },
-                  }
-                : n
-            )
-          );
-          return;
-        }
-        const message = err instanceof Error ? err.message : 'Gaussian splat generation failed';
-        setStatus('error');
-        setProgressText(null);
-        setProgressStep(null);
-        setErrorMessage(message);
-        setCurrentTrainingIteration(null);
-        setMaxTrainingIterations(null);
-        setActiveTaskId(null);
-        activeRunIdRef.current = null;
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    status: 'error' as const,
-                    progressText: null,
-                    progressStep: null,
-                    errorMessage: message,
-                    currentTrainingIteration: null,
-                    maxTrainingIterations: null,
-                    activeTaskId: null,
-                  },
-                }
-              : n
-          )
-        );
-      }
-    })();
-  }, [apiFetch, deviceType, ephemeralSessionId, framePaths, id, setNodes, sourcePlyUrl, status, targetPlyType, trainingIterations, trainingMode]);
-
-  useEffect(() => {
-    if (!workflowRunning) return;
-    if ((framePaths.length === 0 && !sourcePlyUrl) || splatUrl || status !== 'idle') return;
-    handleGenerateSplat();
-  }, [workflowRunning, framePaths, sourcePlyUrl, splatUrl, status, handleGenerateSplat]);
-
-  useEffect(() => {
-    const justStopped = previousWorkflowRunningRef.current && !workflowRunning;
-    previousWorkflowRunningRef.current = workflowRunning;
-    if (!justStopped || status !== 'processing') return;
-
-    cancelRequestedRef.current = true;
-    activeRunIdRef.current = null;
-
-    if (activeTaskId) {
-      void apiFetch('/api/cancel-gaussian-splat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId: activeTaskId }),
-      }).catch(() => {});
-    }
-
-    setStatus('idle');
-    setProgressText('Stopped');
-    setProgressStep(null);
-    setErrorMessage(null);
-    setCurrentTrainingIteration(null);
-    setMaxTrainingIterations(null);
-    setActiveTaskId(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? {
-              ...n,
-              data: {
-                ...n.data,
-                status: 'idle' as const,
-                progressText: 'Stopped',
-                progressStep: null,
-                errorMessage: null,
-                currentTrainingIteration: null,
-                maxTrainingIterations: null,
-                activeTaskId: null,
-              },
-            }
-          : n
-      )
-    );
-  }, [activeTaskId, apiFetch, id, setNodes, status, workflowRunning]);
 
   const hasTrainingProgress =
     status === 'processing' &&
@@ -2424,8 +1949,8 @@ export function GaussianSplatNode({ id, data }: NodeProps<GaussianSplatNodeData>
    5. Model Organize Node
    ==================================================================== */
 export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>) {
-  const { setNodes, getEdges } = useReactFlow();
-  const { workflowRunning, apiFetch } = useWorkflow();
+  const { setNodes } = useReactFlow();
+  const { apiFetch, runSingleNode } = useWorkflow();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(data.modelUrl);
   const [outputUrl, setOutputUrl] = useState<string | null>(data.outputUrl);
@@ -2445,181 +1970,15 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
     }
   }, [outputUrl, modelUrl]);
 
-  // Call Blender organize API (per-layer when layerGlbUrls is set, else single)
+  // Run through the centralized workflow runner; the node keeps only UI/display state.
   const handleOrganize = useCallback(() => {
-    const layerGlbIn = (data.layerGlbUrls && data.layerGlbUrls.length > 0) ? data.layerGlbUrls : null;
-    const cleanupMode = selectModelCleanupMode({ modelUrl, layerGlbUrls: layerGlbIn });
-
-    if (cleanupMode === 'layers' && layerGlbIn) {
-      (async () => {
-        for (const u of layerGlbIn) {
-          if (u.startsWith('blob:')) {
-            setErrorMessage('A layer file is still uploading, please wait...');
-            return;
-          }
-        }
-        setOrganizeStatus('organizing');
-        setErrorMessage(null);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, organizeStatus: 'organizing' as const, errorMessage: null } }
-              : n
-          )
-        );
-        try {
-          const outGlbs: string[] = [];
-          for (const u of layerGlbIn) {
-            const res = await apiFetch('/api/blender-organize', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ modelUrl: u }),
-            });
-            const result = await res.json();
-            if (!result.success) {
-              throw new Error(result.error || 'Model cleanup failed for a layer');
-            }
-            const organizedUrl = result.glbUrl || result.modelUrl;
-            if (!organizedUrl) {
-              throw new Error('No output URL from cleanup');
-            }
-            outGlbs.push(organizedUrl);
-          }
-          const names =
-            (data.layerNames && data.layerNames.length === outGlbs.length
-              ? data.layerNames
-              : outGlbs.map((_, i) => `layer_${i}`)) as string[];
-          const mergeRes = await apiFetch('/api/merge-glb', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ glbPaths: outGlbs, names }),
-          });
-          const merged = await mergeRes.json();
-          if (!mergeRes.ok || !merged.success) {
-            throw new Error(merged.error || 'Failed to merge after cleanup');
-          }
-          const organizedUrl = merged.mergedGlbUrl as string;
-          setOrganizeStatus('done');
-          setOutputUrl(organizedUrl);
-          setOutputType('glb');
-          setErrorMessage(null);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? {
-                    ...n,
-                    data: {
-                      ...n.data,
-                      organizeStatus: 'done' as const,
-                      outputUrl: organizedUrl,
-                      outputType: 'glb' as const,
-                      layerGlbUrls: outGlbs,
-                      errorMessage: null,
-                    },
-                  }
-                : n
-            )
-          );
-        } catch (e) {
-          const message = e instanceof Error ? e.message : 'Model cleanup failed';
-          setOrganizeStatus('error');
-          setErrorMessage(message);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, organizeStatus: 'error' as const, errorMessage: message } }
-                : n
-            )
-          );
-        }
-      })();
-      return;
-    }
-
-    if (cleanupMode === 'none' || !modelUrl || modelUrl.startsWith('blob:')) {
+    const cleanupMode = selectModelCleanupMode({ modelUrl, layerGlbUrls: data.layerGlbUrls });
+    if (cleanupMode === 'none' || modelUrl?.startsWith('blob:') || data.layerGlbUrls?.some((url) => url.startsWith('blob:'))) {
       setErrorMessage('File is uploading, please wait...');
       return;
     }
-
-    setOrganizeStatus('organizing');
-    setErrorMessage(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, organizeStatus: 'organizing' as const, errorMessage: null } }
-          : n
-      )
-    );
-
-    apiFetch('/api/blender-organize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelUrl }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          setOrganizeStatus('error');
-          setErrorMessage(result.error || 'Model cleanup failed');
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, organizeStatus: 'error' as const, errorMessage: result.error || 'Model cleanup failed' } }
-                : n
-            )
-          );
-          return;
-        }
-
-        const organizedUrl = result.glbUrl || result.modelUrl;
-        const organizedType = result.glbUrl ? 'glb' as const : (inferModelType(organizedUrl) || 'obj') as 'glb' | 'fbx' | 'obj' | 'ply';
-        setOrganizeStatus('done');
-        setOutputUrl(organizedUrl);
-        setOutputType(organizedType);
-        setErrorMessage(null);
-
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    organizeStatus: 'done' as const,
-                    outputUrl: organizedUrl,
-                    outputType: organizedType,
-                    layerNames: data.layerNames || [],
-                    layerGlbUrls: data.layerGlbUrls || [],
-                    errorMessage: null,
-                  },
-                }
-              : n
-          )
-        );
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Model cleanup request failed';
-        setOrganizeStatus('error');
-        setErrorMessage(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, organizeStatus: 'error' as const, errorMessage: message } }
-              : n
-          )
-        );
-      });
-  }, [id, modelUrl, setNodes, data.layerGlbUrls, data.layerNames, apiFetch]);
-
-  // Auto-organize when workflow is running and input is received from upstream (and not yet organized)
-  useEffect(() => {
-    if (!workflowRunning) return;
-    const hasLayerGlbs = (data.layerGlbUrls && data.layerGlbUrls.length > 0) as boolean;
-    const hasSingle = modelUrl && !modelUrl.startsWith('blob:');
-    if (organizeStatus === 'idle' && (hasLayerGlbs || hasSingle)) {
-      handleOrganize();
-    }
-  }, [workflowRunning, modelUrl, data.layerGlbUrls, organizeStatus, handleOrganize]);
+    void runSingleNode(id);
+  }, [id, modelUrl, data.layerGlbUrls, runSingleNode]);
 
   // Sync data from upstream changes, including global Clear resetting fields to null.
   useEffect(() => {
@@ -2739,33 +2098,6 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
       )
     );
   }, [id, isUploading, modelUrl, organizeStatus, outputUrl, setNodes]);
-
-  // Push organized model to downstream when outputUrl changes and organizing is done
-  useEffect(() => {
-    if (!data.outputUrl || data.organizeStatus !== 'done') return;
-    const downstreamOutputUrl = data.outputUrl;
-    const edges = getEdges();
-    const downstreamEdges = edges.filter((edge) => edge.source === id);
-    if (downstreamEdges.length > 0) {
-      const actualType = data.outputType || inferModelType(downstreamOutputUrl) || 'obj';
-      const currentLayerNames = data.layerNames || [];
-      const currentLayerGlbs = data.layerGlbUrls || [];
-      const baseUpdate: Record<string, unknown> = {};
-      if (currentLayerNames.length > 0) baseUpdate.layerNames = currentLayerNames;
-      if (currentLayerGlbs.length > 0) baseUpdate.layerGlbUrls = currentLayerGlbs;
-      setNodes((nds) =>
-        nds.map((n) => {
-          const edge = downstreamEdges.find((e) => e.target === n.id);
-          if (!edge) return n;
-          const targetHandle = edge.targetHandle;
-          if (targetHandle === 'model-input') {
-            return { ...n, data: { ...n.data, modelUrl: downstreamOutputUrl, inputType: actualType as 'glb' | 'obj' | 'ply', ...baseUpdate } };
-          }
-          return { ...n, data: { ...n.data, modelUrl: downstreamOutputUrl, ...baseUpdate } };
-        })
-      );
-    }
-  }, [data.outputUrl, data.organizeStatus, data.outputType, id, getEdges, setNodes, data.layerGlbUrls, data.layerNames]);
 
   // Preview: show outputUrl if organized, otherwise show input modelUrl
   const previewUrl = outputUrl || modelUrl;
@@ -2916,7 +2248,7 @@ export function ModelOrganizeNode({ id, data }: NodeProps<ModelOrganizeNodeData>
    ==================================================================== */
 export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
   const { setNodes } = useReactFlow();
-  const { workflowRunning, apiFetch } = useWorkflow();
+  const { runSingleNode } = useWorkflow();
   const [modelUrl, setModelUrl] = useState<string | null>(data.modelUrl);
   const [videoUrl, setVideoUrl] = useState<string | null>(data.videoUrl);
   const [videoName, setVideoName] = useState<string | null>(data.videoName);
@@ -2933,6 +2265,7 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
   const [seedancePackStatus, setSeedancePackStatus] = useState<SeedancePackStatusResult | null>(null);
   const [seedanceInstalling, setSeedanceInstalling] = useState(false);
   const [seedanceMessage, setSeedanceMessage] = useState<string | null>(null);
+  const publishedComfyAssetKeyRef = useRef(data.comfyStatus === 'done' && data.videoUrl ? data.videoUrl : null);
 
   const [comfyUrl, setComfyUrl] = useState(data.comfyUrl || DEFAULT_COMFY_VIDEO_PRESET.comfyUrl);
   const [prompt, setPrompt] = useState(data.prompt || DEFAULT_COMFY_VIDEO_PRESET.prompt);
@@ -3174,6 +2507,18 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
     refreshComfyStatus();
   }, [refreshComfyStatus]);
 
+  useEffect(() => {
+    if (comfyStatus !== 'done' || !videoUrl || publishedComfyAssetKeyRef.current === videoUrl) return;
+    publishedComfyAssetKeyRef.current = videoUrl;
+    void recordAsset({
+      name: videoName || 'ComfyUI Video',
+      assetType: 'render-video',
+      fileUrl: videoUrl,
+      fileType: 'mp4',
+      sourceNode: 'comfyVideo',
+    });
+  }, [comfyStatus, videoName, videoUrl]);
+
   const handleGenerate = useCallback(() => {
     const inputModelUrl = modelUrl;
     if (!inputModelUrl || isBlobUrl(inputModelUrl)) {
@@ -3188,85 +2533,9 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
       updateRunState({ errorMessage: message, comfyStatus: 'error' });
       return;
     }
-
-    const settings = collectSettings();
-    setComfyStatus('processing');
-    setProgressText('Submitting to ComfyUI...');
-    setErrorMessage(null);
-    updateRunState({
-      ...settings,
-      comfyStatus: 'processing',
-      progressText: 'Submitting to ComfyUI...',
-      errorMessage: null,
-      videoUrl: null,
-      videoName: null,
-      promptId: null,
-    });
-
-    apiFetch('/api/generate-comfy-video', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelUrl: inputModelUrl, settings }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          throw new Error(result.error || 'ComfyUI video generation failed');
-        }
-        const nextVideoUrl = result.videoUrl as string;
-        const nextVideoName = typeof result.videoName === 'string' ? result.videoName : 'ComfyUI Video';
-        const nextPromptId = typeof result.promptId === 'string' ? result.promptId : null;
-        const nextInputDir = typeof result.detectedInputDir === 'string' ? result.detectedInputDir : null;
-        const nextOutputDir = typeof result.detectedOutputDir === 'string' ? result.detectedOutputDir : null;
-        const nextInput3dDir = typeof result.detectedInput3dDir === 'string' ? result.detectedInput3dDir : null;
-
-        setComfyStatus('done');
-        setProgressText('ComfyUI video ready');
-        setVideoUrl(nextVideoUrl);
-        setVideoName(nextVideoName);
-        setPromptId(nextPromptId);
-        setComfyOnline(true);
-        setDetectedInputDir(nextInputDir);
-        setDetectedOutputDir(nextOutputDir);
-        setDetectedInput3dDir(nextInput3dDir);
-        setErrorMessage(null);
-
-        recordAsset({
-          name: nextVideoName,
-          assetType: 'render-video',
-          fileUrl: nextVideoUrl,
-          fileType: 'mp4',
-          sourceNode: 'comfyVideo',
-        });
-        updateRunState({
-          comfyStatus: 'done',
-          progressText: 'ComfyUI video ready',
-          videoUrl: nextVideoUrl,
-          videoName: nextVideoName,
-          promptId: nextPromptId,
-          comfyOnline: true,
-          detectedInputDir: nextInputDir,
-          detectedOutputDir: nextOutputDir,
-          detectedInput3dDir: nextInput3dDir,
-          errorMessage: null,
-        });
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'ComfyUI video generation failed';
-        setComfyStatus('error');
-        setProgressText(null);
-        setErrorMessage(message);
-        updateRunState({ comfyStatus: 'error', progressText: null, errorMessage: message });
-      });
-  }, [apiFetch, collectSettings, modelUrl, seedancePackStatus, updateRunState]);
-
-  useEffect(() => {
-    if (!workflowRunning) return;
-    if (modelUrl && !isBlobUrl(modelUrl) && !videoUrl && comfyStatus !== 'processing') {
-      handleGenerate();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowRunning, modelUrl]);
+    commitSettings(collectSettings());
+    void runSingleNode(id);
+  }, [collectSettings, commitSettings, id, modelUrl, runSingleNode, seedancePackStatus, updateRunState]);
 
   const visualStatus: NodeVisualStatus =
     comfyStatus === 'processing' ? 'processing' : comfyStatus === 'done' ? 'done' : comfyStatus === 'error' ? 'error' : 'idle';
@@ -3673,7 +2942,7 @@ export function ComfyVideoNode({ id, data }: NodeProps<ComfyVideoNodeData>) {
    ==================================================================== */
 export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) {
   const { setNodes } = useReactFlow();
-  const { workflowRunning, apiFetch } = useWorkflow();
+  const { runSingleNode } = useWorkflow();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(data.videoUrl);
   const [videoName, setVideoName] = useState<string | null>(data.videoName);
@@ -3681,13 +2950,30 @@ export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) 
   const [videoGenerating, setVideoGenerating] = useState(data.videoGenerating || false);
   const [errorMessage, setErrorMessage] = useState<string | null>(data.errorMessage);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [lightParams, setLightParams] = useState<LightParams | null>(data.lightParams || null);
+  const publishedRotationAssetKeyRef = useRef(
+    data.videoName === 'Rotation Preview' && data.videoUrl ? data.videoUrl : null,
+  );
 
   // Sync upstream data changes to local state
   useEffect(() => { setVideoUrl(data.videoUrl); }, [data.videoUrl]);
   useEffect(() => { setVideoName(data.videoName); }, [data.videoName]);
   useEffect(() => { setModelUrl(data.modelUrl); }, [data.modelUrl]);
-  useEffect(() => { if (data.lightParams) setLightParams(data.lightParams); }, [data.lightParams]);
+  useEffect(() => { setVideoGenerating(data.videoGenerating || false); }, [data.videoGenerating]);
+  useEffect(() => { setErrorMessage(data.errorMessage); }, [data.errorMessage]);
+
+  useEffect(() => {
+    if (videoGenerating || videoName !== 'Rotation Preview' || !videoUrl || publishedRotationAssetKeyRef.current === videoUrl) {
+      return;
+    }
+    publishedRotationAssetKeyRef.current = videoUrl;
+    void recordAsset({
+      name: 'Rotation preview video',
+      assetType: 'render-video',
+      fileUrl: videoUrl,
+      fileType: 'mp4',
+      sourceNode: 'videoPreview',
+    });
+  }, [videoGenerating, videoName, videoUrl]);
 
   const handleDelete = useCallback(() => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
@@ -3696,96 +2982,15 @@ export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) 
   // Helper: check if a URL is a browser blob URL (not yet uploaded to server)
   const isBlobUrl = (url: string | null): boolean => !!url && url.startsWith('blob:');
 
-  // Generate 360° rotation video from OBJ model
+  // Generate 360° rotation video through the centralized workflow runner.
   const handleGenerateVideo = useCallback(() => {
     const inputModelUrl = modelUrl;
     if (!inputModelUrl || isBlobUrl(inputModelUrl)) {
       setErrorMessage('Model file unavailable, please wait for upload');
       return;
     }
-
-    setVideoGenerating(true);
-    setErrorMessage(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, videoGenerating: true, errorMessage: null } }
-          : n
-      )
-    );
-
-    apiFetch('/api/generate-rotation-video', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelUrl: inputModelUrl, lightParams }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          setVideoGenerating(false);
-          setErrorMessage(result.error || 'Video generation failed');
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, videoGenerating: false, errorMessage: result.error } }
-                : n
-            )
-          );
-          return;
-        }
-
-        setVideoGenerating(false);
-        setVideoUrl(result.videoUrl);
-        setVideoName('Rotation Preview');
-        setErrorMessage(null);
-
-        // Record rendered video to asset library
-        recordAsset({
-          name: 'Rotation preview video',
-          assetType: 'render-video',
-          fileUrl: result.videoUrl,
-          fileType: 'mp4',
-          sourceNode: 'videoPreview',
-        });
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    videoGenerating: false,
-                    videoUrl: result.videoUrl,
-                    videoName: 'Rotation Preview',
-                    errorMessage: null,
-                  },
-                }
-              : n
-          )
-        );
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Video generation request failed';
-        setVideoGenerating(false);
-        setErrorMessage(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, videoGenerating: false, errorMessage: message } }
-              : n
-          )
-        );
-      });
-  }, [id, modelUrl, setNodes, lightParams, apiFetch]);
-
-  // Auto-generate video when workflow is running and modelUrl is ready
-  useEffect(() => {
-    if (!workflowRunning) return;
-    if (modelUrl && !isBlobUrl(modelUrl) && !videoUrl && !videoGenerating) {
-      handleGenerateVideo();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowRunning, modelUrl]);
+    void runSingleNode(id);
+  }, [id, modelUrl, runSingleNode]);
 
   const handleFullscreenDialogClick = useCallback(() => {
     setIsFullscreen(true);
@@ -3940,8 +3145,8 @@ export function VideoPreviewNode({ id, data }: NodeProps<VideoPreviewNodeData>) 
    7. Model Surface Processing Node
    ==================================================================== */
 export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) {
-  const { setNodes, getEdges } = useReactFlow();
-  const { apiFetch } = useWorkflow();
+  const { setNodes } = useReactFlow();
+  const { apiFetch, runSingleNode } = useWorkflow();
   const objFileInputRef = useRef<HTMLInputElement>(null);
   const textureInputRef = useRef<HTMLInputElement>(null);
   const [selectedLayer, setSelectedLayer] = useState<string | null>(data.selectedLayer);
@@ -3978,7 +3183,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
   /** Browser-only merged GLB preview for per-layer GLB workflow */
   const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
   const previewBlobUrlRef = useRef<string | null>(null);
-  previewBlobUrlRef.current = previewBlobUrl;
   /** Old preview blob URLs; revoked after viewer confirms the current `previewBlobUrl` loaded (see handlePreviewGlbLoadSuccess). */
   const previewBlobRevokeQueueRef = useRef<string[]>([]);
   const [previewMergeBusy, setPreviewMergeBusy] = useState(false);
@@ -4026,24 +3230,40 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
 
   const prevUpstreamGlbKeyRef = useRef<string>('');
   const layerParamsRef = useRef(layerParams);
-  layerParamsRef.current = layerParams;
   const selectedLayerRef = useRef(selectedLayer);
-  selectedLayerRef.current = selectedLayer;
   const lightParamsRef = useRef(lightParams);
-  lightParamsRef.current = lightParams;
   const surfaceApiRef = useRef({
     materialPreviewUrl: null as string | null,
     layerUrlA: {} as Record<string, string>,
     dataLightParams: null as LightParams | null,
   });
-  surfaceApiRef.current = {
-    materialPreviewUrl: data.materialPreviewUrl,
-    layerUrlA: (data.layerUrlA || {}) as Record<string, string>,
-    dataLightParams: data.lightParams || null,
-  };
   /** Skip one auto-Blender debounce after layer selection (only fire on material edits). */
   const skipAutoBlenderOnceRef = useRef(false);
   const autoBlenderAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    previewBlobUrlRef.current = previewBlobUrl;
+  }, [previewBlobUrl]);
+
+  useEffect(() => {
+    layerParamsRef.current = layerParams;
+  }, [layerParams]);
+
+  useEffect(() => {
+    selectedLayerRef.current = selectedLayer;
+  }, [selectedLayer]);
+
+  useEffect(() => {
+    lightParamsRef.current = lightParams;
+  }, [lightParams]);
+
+  useEffect(() => {
+    surfaceApiRef.current = {
+      materialPreviewUrl: data.materialPreviewUrl,
+      layerUrlA: (data.layerUrlA || {}) as Record<string, string>,
+      dataLightParams: data.lightParams || null,
+    };
+  }, [data.materialPreviewUrl, data.layerUrlA, data.lightParams]);
 
   // Determine what to show in the preview
   const previewModelUrl = shouldUseLayerMergedPreview
@@ -4461,47 +3681,6 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
     setNodes((nds) => nds.filter((n) => n.id !== id));
   }, [id, setNodes]);
 
-  // Push data to downstream nodes — only after Blender render completes
-  // Do NOT push the raw upstream modelUrl; downstream should only receive the
-  // fully processed model (outputModelUrl) after the user clicks "Apply Blender Render".
-  useEffect(() => {
-    const edges = getEdges();
-    const downstreamEdges = edges.filter((edge) => edge.source === id);
-    if (downstreamEdges.length === 0) return;
-
-    // Only push when Blender has produced output
-    if (!data.outputModelUrl) return;
-    const outputUrl = data.outputModelUrl; // capture for type narrowing in closure
-    const currentLightParams = data.lightParams || { ...DEFAULT_LIGHT_PARAMS };
-    const currentLayerNames = data.layerNames || [];
-
-    setNodes((nds) =>
-      nds.map((n) => {
-        const edge = downstreamEdges.find((e) => e.target === n.id);
-        if (!edge) return n;
-
-        const targetHandle = edge.targetHandle;
-
-        // Push outputModelUrl (Blender output with materials baked in) + lightParams
-        const baseUpdate: Record<string, unknown> = {};
-        if (currentLayerNames.length > 0) baseUpdate.layerNames = currentLayerNames;
-        if (data.layerGlbUrls && data.layerGlbUrls.length > 0) {
-          baseUpdate.layerGlbUrls = data.layerGlbUrls;
-        }
-
-        if (targetHandle === 'model-input') {
-          const outType = data.outputModelType || inferModelType(outputUrl) || 'obj';
-          return { ...n, data: { ...n.data, modelUrl: outputUrl, inputType: outType as 'glb' | 'obj' | 'ply', lightParams: currentLightParams, ...baseUpdate } };
-        } else if (targetHandle === 'obj-input') {
-          return { ...n, data: { ...n.data, modelUrl: outputUrl, lightParams: currentLightParams, ...baseUpdate } };
-        }
-
-        return n;
-      })
-    );
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.outputModelUrl, data.layerGlbUrls, data.layerNames]);
-
   // Handle OBJ model upload from local file
   const handleObjFileUpload = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -4749,206 +3928,34 @@ export function ModelSurfaceNode({ id, data }: NodeProps<ModelSurfaceNodeData>) 
     [id, setNodes]
   );
 
-  // Send material params + model to Blender for rendering
+  // Send material params + model through the centralized workflow runner.
   const sendToBlender = useCallback(() => {
     const gIn = data.layerGlbUrls;
     if (gIn && gIn.length > 0) {
-      (async () => {
-        for (const u of gIn) {
-          if (u.startsWith('blob:')) {
-            setBlenderError('A layer file is still uploading, please wait');
-            return;
-          }
-        }
-        const layerUrlA = (data.layerUrlA || {}) as Record<string, string>;
-        const layerUrlB = (data.layerUrlB || {}) as Record<string, string>;
-        const entries = orderedLayerGlbEntries(gIn, layerNames, layerUrlA).filter((e) => isGltfLikeUrl(e.url));
-        if (entries.length === 0) {
-          setBlenderError('Server merge needs .glb/.gltf per-layer URLs.');
+      for (const u of gIn) {
+        if (u.startsWith('blob:')) {
+          setBlenderError('A layer file is still uploading, please wait');
           return;
         }
-        const mergeNames = entries.map((e) => e.layerName);
-        const mergePaths = mergeNames.map((nm) => layerUrlB[nm] || layerUrlA[nm] || entries.find((e) => e.layerName === nm)!.url);
-        for (const p of mergePaths) {
-          if (isBlobUrl(p)) {
-            setBlenderError('Cannot merge blob URLs on server; wait for uploads to finish');
-            return;
-          }
-        }
-
-        setBlenderProcessing(true);
-        setBlenderError(null);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, blenderProcessing: true, blenderError: null } }
-              : n
-          )
-        );
-        try {
-          const mRes = await apiFetch('/api/merge-glb', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ glbPaths: mergePaths, names: mergeNames }),
-          });
-          const raw = await mRes.text();
-          let merged: { success?: boolean; error?: string; mergedGlbUrl?: string };
-          try {
-            merged = JSON.parse(raw) as typeof merged;
-          } catch {
-            throw new Error(
-              `merge-glb returned non-JSON (HTTP ${mRes.status}): ${raw.trim().slice(0, 120)}`,
-            );
-          }
-          if (!mRes.ok || !merged.success) {
-            throw new Error(merged.error || 'Server merge failed');
-          }
-          const newModelUrl = merged.mergedGlbUrl as string;
-          setBlenderProcessing(false);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? {
-                    ...n,
-                    data: {
-                      ...n.data,
-                      blenderProcessing: false,
-                      blenderError: null,
-                      outputModelUrl: newModelUrl,
-                      outputModelType: 'glb' as const,
-                      layerParams,
-                    },
-                  }
-                : n
-            )
-          );
-        } catch (e) {
-          const message = e instanceof Error ? e.message : 'Merge failed';
-          setBlenderProcessing(false);
-          setBlenderError(message);
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, blenderProcessing: false, blenderError: message } }
-                : n
-            )
-          );
-        }
-      })();
+      }
+    } else if (!data.modelUrl) {
       return;
-    }
-
-    if (!data.modelUrl) return;
-
-    // Guard: blob URLs are not accessible by server-side APIs
-    if (isBlobUrl(data.modelUrl)) {
+    } else if (isBlobUrl(data.modelUrl)) {
       setBlenderError('File is uploading, please wait before trying again');
       return;
     }
-
-    // Use selected layer's params for legacy / UI snapshot; per-layer when multi applies full map
-    const targetGroup = selectedLayer || 'all';
     const params = selectedLayer
       ? (layerParams[selectedLayer] || { ...DEFAULT_MATERIAL_PARAMS })
       : { ...DEFAULT_MATERIAL_PARAMS };
-
-    const knownLayers: string[] =
-      layerNames.length > 0
-        ? layerNames
-        : detectedLayers.length > 0
-          ? detectedLayers
-          : selectedLayer
-            ? [selectedLayer]
-            : [];
-
-    const fullLayerParams: Record<string, MaterialParams> = {};
-    for (const n of knownLayers) {
-      fullLayerParams[n] = { ...DEFAULT_MATERIAL_PARAMS, ...layerParams[n] };
-    }
-    const useMultiLayer = Object.keys(fullLayerParams).length > 0;
-
-    setBlenderProcessing(true);
-    setBlenderError(null);
     setNodes((nds) =>
       nds.map((n) =>
         n.id === id
-          ? { ...n, data: { ...n.data, blenderProcessing: true, blenderError: null, layerParams, materialParams: params } }
+          ? { ...n, data: { ...n.data, blenderError: null, layerParams, materialParams: params, lightParams } }
           : n
       )
     );
-
-    const body: Record<string, unknown> = {
-      action: 'apply',
-      modelUrl: data.modelUrl,
-      textureUrl: data.materialPreviewUrl || undefined,
-      lightParams,
-      render: true,
-    };
-    if (useMultiLayer) {
-      body.layerParams = fullLayerParams;
-    } else {
-      body.group = targetGroup;
-      body.materialParams = params;
-      body.baseColorModified = !!params.base_color_modified;
-    }
-
-    apiFetch('/api/blender-material', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        setBlenderProcessing(false);
-        if (!result.success) {
-          setBlenderError(result.error || 'Blender processing failed');
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, blenderProcessing: false, blenderError: result.error } }
-                : n
-            )
-          );
-          return;
-        }
-
-        // Update with Blender output model (GLB preferred for embedded textures)
-        const newModelUrl = result.glbUrl || result.modelUrl;
-        const newModelType = result.glbUrl ? 'glb' as const : (inferModelType(result.modelUrl || '') || 'obj') as 'glb' | 'fbx' | 'obj' | 'ply';
-        const newRenderUrl = result.renderUrl || null;
-
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    blenderProcessing: false,
-                    blenderError: null,
-                    outputModelUrl: newModelUrl,
-                    outputModelType: newModelType,
-                    renderUrl: newRenderUrl,
-                    layerParams,
-                  },
-                }
-              : n
-          )
-        );
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Blender request failed';
-        setBlenderProcessing(false);
-        setBlenderError(message);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, blenderProcessing: false, blenderError: message } }
-              : n
-          )
-        );
-      });
-  }, [id, data, selectedLayer, layerParams, layerNames, detectedLayers, setNodes, lightParams, apiFetch]);
+    void runSingleNode(id);
+  }, [id, data.layerGlbUrls, data.modelUrl, selectedLayer, layerParams, setNodes, lightParams, runSingleNode]);
 
   // Helper: RGB array to hex string for color input
   const rgbToHex = (rgb: [number, number, number]): string => {
@@ -5390,8 +4397,8 @@ function ParamRow({ label, children }: { label: string; children: React.ReactNod
    9. Mesh Generation Node
    ==================================================================== */
 export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeData>) {
-  const { setNodes, getEdges } = useReactFlow();
-  const { workflowRunning, apiFetch, ephemeralSessionId } = useWorkflow();
+  const { setNodes } = useReactFlow();
+  const { apiFetch, ephemeralSessionId, runSingleNode } = useWorkflow();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(data.modelUrl);
   const [inputType, setInputType] = useState<'ply' | 'obj' | 'glb' | 'splat' | null>(data.inputType);
@@ -5407,7 +4414,7 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
   const [renderUrl, setRenderUrl] = useState<string | null>(data.renderUrl);
   const [isUploading, setIsUploading] = useState(false);
   const [lightParams, setLightParams] = useState<LightParams | null>(data.lightParams || null);
-  const [layerGlbUrls, setLayerGlbUrls] = useState<string[]>(data.layerGlbUrls || []);
+  const [, setLayerGlbUrls] = useState<string[]>(data.layerGlbUrls || []);
 
   // Helper: check if a URL is a browser blob URL (not yet uploaded to server)
   const isBlobUrl = (url: string | null): boolean => !!url && url.startsWith('blob:');
@@ -5437,60 +4444,6 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
     setLayerGlbUrls(data.layerGlbUrls || []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.modelUrl, data.inputType, data.meshStatus, data.outputUrl, data.outputType, data.outputFormat, data.errorMessage, data.faceCount, data.gaussianCount, data.computeBackend, data.renderUrl, data.lightParams, data.layerGlbUrls]);
-
-  // Push model output to downstream nodes when mesh generation is done
-  useEffect(() => {
-    if (data.meshStatus === 'done' && data.outputUrl) {
-      const downstreamOutputUrl = data.outputUrl;
-      const downstreamOutputType = data.outputType;
-      if (downstreamOutputType === 'splat') return;
-      const edges = getEdges();
-      const downstreamEdges = edges.filter(
-        (edge) => edge.source === id && edge.sourceHandle === 'output'
-      );
-      if (downstreamEdges.length > 0) {
-        const currentLightParams = lightParams;
-        const forwardLayers: Record<string, unknown> = {};
-        if (data.layerNames?.length) forwardLayers.layerNames = data.layerNames;
-        if (layerGlbUrls.length > 0) forwardLayers.layerGlbUrls = layerGlbUrls;
-        setNodes((nds) =>
-          nds.map((n) => {
-            const edge = downstreamEdges.find((e) => e.target === n.id);
-            if (!edge) return n;
-            // Route to correct input field based on targetHandle
-            const targetHandle = edge.targetHandle;
-            if (targetHandle === 'model-input') {
-              // Determine input type based on output model type
-              const derivedInputType = downstreamOutputType === 'ply' ? 'ply' as const : (downstreamOutputType === 'glb' ? 'glb' as const : 'obj' as const);
-              return {
-                ...n,
-                data: {
-                  ...n.data,
-                  modelUrl: downstreamOutputUrl,
-                  inputType: derivedInputType,
-                  ...(currentLightParams ? { lightParams: currentLightParams } : {}),
-                  ...forwardLayers,
-                },
-              };
-            } else if (targetHandle === 'obj-input') {
-              // All nodes now use modelUrl as their input field
-              return {
-                ...n,
-                data: {
-                  ...n.data,
-                  modelUrl: downstreamOutputUrl,
-                  ...(currentLightParams ? { lightParams: currentLightParams } : {}),
-                  ...forwardLayers,
-                },
-              };
-            }
-            return n;
-          })
-        );
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.meshStatus, data.outputUrl, data.outputType, layerGlbUrls, data.layerNames]);
 
   // Publish reusable mesh model outputs once.
   const lastAssetLibraryModelUrl = useRef<string | null>(null);
@@ -5696,181 +4649,16 @@ export function ModelGenerationNode({ id, data }: NodeProps<ModelGenerationNodeD
       return;
     }
 
-    const requestedOutputFormat = inputType === 'splat' ? 'glb' : outputFormat;
     if (inputType === 'splat' && outputFormat !== 'glb') {
       setOutputFormat('glb');
-    }
-
-    setMeshStatus('processing');
-    setErrorMessage(null);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id
-          ? { ...n, data: { ...n.data, meshStatus: 'processing' as const, errorMessage: null } }
-          : n
-      )
-    );
-
-    apiFetch('/api/generate-mesh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plyUrl: modelUrl, outputFormat: requestedOutputFormat, ephemeralSessionId }),
-    })
-      .then((res) => res.json())
-      .then((result) => {
-        if (!result.success) {
-          setMeshStatus('error');
-          setErrorMessage(result.error || 'Failed to start mesh generation');
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === id
-                ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: result.error || 'Failed to start mesh generation' } }
-                : n
-            )
-          );
-          return;
-        }
-
-        const taskId = result.taskId;
-        let retries = 0;
-        const MAX_RETRIES = 60; // 60 * 2s = 2 min max wait
-        const poll = () => {
-          apiFetch(`/api/mesh-status?taskId=${taskId}`)
-            .then((r) => r.json())
-            .then((task) => {
-              if (task.status === 'processing') {
-                setTimeout(poll, 2000);
-              } else if (task.status === 'done' && task.result) {
-                const {
-                  meshUrl,
-                  meshFormat,
-                  faceCount: fc,
-                  layerGlbUrls: nextLayerGlbUrls = [],
-                  layerNames: nextLayerNames = [],
-                  segmentationProfile,
-                  segmentationLabelCount,
-                  segmentationMetadataUrl,
-                } = task.result;
-                const resolvedType = meshFormat as 'glb' | 'obj' | 'ply';
-                const nextInputType = inputType === 'splat'
-                  ? 'splat' as const
-                  : resolvedType === 'ply'
-                    ? 'ply' as const
-                    : resolvedType === 'glb'
-                      ? 'glb' as const
-                      : 'obj' as const;
-                setLayerGlbUrls(nextLayerGlbUrls);
-                setMeshStatus('done');
-                setOutputUrl(meshUrl);
-                setOutputType(resolvedType);
-                setModelUrl(meshUrl);
-                setInputType(nextInputType);
-                setFaceCount(fc);
-                setErrorMessage(null);
-                setNodes((nds) =>
-                  nds.map((n) =>
-                    n.id === id
-                      ? {
-                          ...n,
-                          data: {
-                            ...n.data,
-                            meshStatus: 'done' as const,
-                            modelUrl: meshUrl,
-                            inputType: nextInputType,
-                            outputUrl: meshUrl,
-                            outputType: resolvedType,
-                            faceCount: fc,
-                            layerGlbUrls: nextLayerGlbUrls,
-                            layerNames: nextLayerNames,
-                            segmentationProfile,
-                            segmentationLabelCount,
-                            segmentationMetadataUrl,
-                            errorMessage: null,
-                          },
-                        }
-                      : n
-                  )
-                );
-              } else if (task.status === 'error') {
-                setMeshStatus('error');
-                setErrorMessage(task.error || 'Mesh generation failed');
-                setNodes((nds) =>
-                  nds.map((n) =>
-                    n.id === id
-                      ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: task.error || 'Mesh generation failed' } }
-                      : n
-                  )
-                );
-              } else if (task.error && !task.status) {
-                // 404 or similar - task may still be initializing, retry
-                retries++;
-                if (retries < MAX_RETRIES) {
-                  setTimeout(poll, 2000);
-                } else {
-                  setMeshStatus('error');
-                  setErrorMessage('Task query timeout');
-                  setNodes((nds) =>
-                    nds.map((n) =>
-                      n.id === id
-                        ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: 'Task query timeout' } }
-                        : n
-                    )
-                  );
-                }
-              }
-            })
-            .catch(() => {
-              setMeshStatus('error');
-              setErrorMessage('Polling progress failed');
-              setNodes((nds) =>
-                nds.map((n) =>
-                  n.id === id
-                    ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: 'Polling progress failed' } }
-                    : n
-                )
-              );
-            });
-        };
-        setTimeout(poll, 1000);
-      })
-      .catch(() => {
-        setMeshStatus('error');
-        setErrorMessage('Mesh generation request failed');
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, meshStatus: 'error' as const, errorMessage: 'Mesh generation request failed' } }
-              : n
-          )
-        );
-      });
-  }, [id, modelUrl, outputFormat, setNodes, inputType, apiFetch, ephemeralSessionId]);
-
-  // Auto-trigger when workflow is running and inputs are ready
-  useEffect(() => {
-    if (!workflowRunning || meshStatus !== 'idle') return;
-    if (!modelUrl) return;
-
-    if (inputType === 'ply') {
-      handleGenerateMesh();
-    } else if (inputType === 'splat') {
-      handleGenerateMesh();
-    } else if (inputType === 'obj' || inputType === 'glb') {
-      const actualType = inputType || inferModelType(modelUrl) || 'obj';
-      setMeshStatus('done');
-      setModelUrl(modelUrl);
-      setOutputUrl(modelUrl);
-      setOutputType(actualType as 'glb' | 'obj' | 'ply');
       setNodes((nds) =>
         nds.map((n) =>
-          n.id === id
-            ? { ...n, data: { ...n.data, meshStatus: 'done' as const, modelUrl, inputType: actualType as 'glb' | 'obj' | 'ply', outputUrl: modelUrl, outputType: actualType as 'glb' | 'obj' | 'ply' } }
-            : n
+          n.id === id ? { ...n, data: { ...n.data, outputFormat: 'glb' as const } } : n
         )
       );
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowRunning, modelUrl, inputType, meshStatus]);
+    void runSingleNode(id);
+  }, [id, modelUrl, outputFormat, setNodes, inputType, ephemeralSessionId, runSingleNode]);
 
   const viewerModelType = outputType === 'splat' ? null : outputType;
 

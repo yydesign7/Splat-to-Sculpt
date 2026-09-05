@@ -1,6 +1,7 @@
 import type { WorkflowRunState } from './runtime-state';
 
 export type WorkflowRunAction =
+  | { type: 'RUN_REFRESH'; runId: string }
   | { type: 'RUN_CANCELLING'; runId: string }
   | { type: 'RUN_CANCELLED'; runId: string }
   | { type: 'RUN_FAILED'; runId: string; error: string }
@@ -51,6 +52,8 @@ export function workflowRunReducer(state: WorkflowRunState, action: WorkflowRunA
   if (action.runId !== state.runId) return state;
 
   switch (action.type) {
+    case 'RUN_REFRESH':
+      return refreshRunPhase(state);
     case 'RUN_CANCELLING':
       return { ...state, phase: 'cancelling' };
     case 'RUN_CANCELLED':

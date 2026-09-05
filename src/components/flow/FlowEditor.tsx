@@ -41,16 +41,15 @@ import {
 } from './custom-nodes';
 import { WorkflowContext } from '@/lib/workflow-context';
 import { workflowApiFetch } from '@/lib/workflow-api-fetch';
-import { computeDownstreamPushes, isNodeDone } from '@/lib/workflow-engine';
 import { getNodeVisualTheme } from '@/lib/node-config';
 import { initialEdges, initialNodes } from '@/lib/default-workflow';
 import { buildClearedWorkflowGraph } from '@/lib/workflow-clear';
 import { getPreferredGaussianMeshOutputHandle } from '@/lib/gaussian-output-routing';
 import { buildAssetDropNodeUpdates } from '@/lib/asset-drop-mapping';
 import { findDropTargetNode } from '@/lib/flow-node-hit-test';
-import { createDefaultNodeData, isWorkflowNodeType } from '@/lib/workflow/node-registry';
-import { compileWorkflowGraph } from '@/lib/workflow/graph-compiler';
+import { createDefaultNodeData, getWorkflowNodeDefinition, isWorkflowNodeType } from '@/lib/workflow/node-registry';
 import { migrateSavedWorkflow, SAVED_WORKFLOW_SCHEMA_VERSION } from '@/lib/workflow/migrations';
+import { useWorkflowRunner } from '@/hooks/use-workflow-runner';
 
 /* ========== Node Types Registry ========== */
 const nodeTypes: NodeTypes = {
@@ -147,63 +146,9 @@ const defaultEdgeOptions = {
 const proOptions = { hideAttribution: true };
 const getMinimapNodeColor = (node: Node) => getNodeVisualTheme(node.type || '').accent;
 
-function getTerminalWorkflowNodes(nodes: Node[], edges: Edge[]) {
-  const connectedNodeIds = new Set<string>();
-  const sourceNodeIds = new Set<string>();
-
-  for (const edge of edges) {
-    connectedNodeIds.add(edge.source);
-    connectedNodeIds.add(edge.target);
-    sourceNodeIds.add(edge.source);
-  }
-
-  return nodes.filter(
-    (node) =>
-      node.type !== 'stickyNote' &&
-      connectedNodeIds.has(node.id) &&
-      !sourceNodeIds.has(node.id)
-  );
-}
-
-function getConnectedWorkflowNodes(nodes: Node[], edges: Edge[]) {
-  const connectedNodeIds = new Set<string>();
-  for (const edge of edges) {
-    connectedNodeIds.add(edge.source);
-    connectedNodeIds.add(edge.target);
-  }
-  const connected = nodes.filter((node) => node.type !== 'stickyNote' && connectedNodeIds.has(node.id));
-  return connected.length > 0 ? connected : nodes.filter((node) => node.type !== 'stickyNote');
-}
-
-function areWorkflowValuesEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true;
-
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((item, index) => areWorkflowValuesEqual(item, b[index]));
-  }
-
-  if (
-    a !== null &&
-    b !== null &&
-    typeof a === 'object' &&
-    typeof b === 'object' &&
-    Object.getPrototypeOf(a) === Object.prototype &&
-    Object.getPrototypeOf(b) === Object.prototype
-  ) {
-    const aRecord = a as Record<string, unknown>;
-    const bRecord = b as Record<string, unknown>;
-    const aKeys = Object.keys(aRecord);
-    const bKeys = Object.keys(bRecord);
-    return (
-      aKeys.length === bKeys.length &&
-      aKeys.every((key) => (
-        Object.prototype.hasOwnProperty.call(bRecord, key) &&
-        areWorkflowValuesEqual(aRecord[key], bRecord[key])
-      ))
-    );
-  }
-
-  return false;
+function isWorkflowNodeDone(node: Node | undefined): boolean {
+  if (!node) return false;
+  return getWorkflowNodeDefinition(node.type)?.getCompletion(node).complete ?? false;
 }
 
 function getClearedNodeData(node: Node): Record<string, unknown> {
@@ -276,8 +221,6 @@ function FlowEditorInner() {
     initialEdges.map((edge) => normalizeWorkflowEdge(edge, initialNodes)),
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [workflowRunning, setWorkflowRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
   const [ephemeralSessionId, setEphemeralSessionId] = useState<string | null>(null);
   const [canvasRevision, setCanvasRevision] = useState(0);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
@@ -314,6 +257,13 @@ function FlowEditorInner() {
     },
     [ephemeralSessionId],
   );
+  const workflowRunner = useWorkflowRunner({
+    nodes,
+    edges,
+    setNodes,
+    apiFetch,
+    ephemeralSessionId,
+  });
 
   /* ---- Connection ---- */
   const onConnect: OnConnect = useCallback(
@@ -380,8 +330,8 @@ function FlowEditorInner() {
         const sourceNode = nodes.find((n) => n.id === edge.source);
         const targetNode = nodes.find((n) => n.id === edge.target);
 
-        const sourceDone = isNodeDone(sourceNode);
-        const targetDone = isNodeDone(targetNode);
+        const sourceDone = isWorkflowNodeDone(sourceNode);
+        const targetDone = isWorkflowNodeDone(targetNode);
 
         const shouldAnimate = sourceDone && !targetDone;
 
@@ -428,88 +378,6 @@ function FlowEditorInner() {
       return changed ? nextEdges : eds;
     });
   }, [nodes, setEdges]);
-
-  /* ---- Unified data push: when a node completes, auto-push data to downstream ---- */
-  useEffect(() => {
-    if (!workflowRunning) return;
-
-    // Find all nodes that just completed (done + not yet pushed to downstream)
-    const pushUpdates: Array<{ targetNodeId: string; updates: Record<string, unknown> }> = [];
-
-    for (const node of nodes) {
-      if (!isNodeDone(node)) continue;
-
-      const pushes = computeDownstreamPushes(node, edges, nodes);
-      for (const push of pushes) {
-        // Only push if the target node doesn't already have the data
-        const targetNode = nodes.find((n) => n.id === push.targetNodeId);
-        if (!targetNode) continue;
-
-        // Check if any field in the update is different from current data
-        const hasNewData = Object.entries(push.updates).some(
-          ([key, value]) => !areWorkflowValuesEqual(targetNode.data[key], value)
-        );
-        if (hasNewData) {
-          pushUpdates.push(push);
-        }
-      }
-    }
-
-    if (pushUpdates.length === 0) return;
-
-    // Apply all pushes in a single setNodes call
-    setNodes((nds) =>
-      nds.map((n) => {
-        const updatesForNode = pushUpdates
-          .filter((p) => p.targetNodeId === n.id)
-          .reduce<Record<string, unknown>>((acc, p) => ({ ...acc, ...p.updates }), {});
-
-        if (Object.keys(updatesForNode).length === 0) return n;
-
-        let nextUpdates = updatesForNode;
-        if (
-          n.type === 'gaussianSplat' &&
-          Array.isArray(updatesForNode.framePaths) &&
-          !areWorkflowValuesEqual(n.data.framePaths, updatesForNode.framePaths)
-        ) {
-          nextUpdates = {
-            ...updatesForNode,
-            sourcePlyUrl: null,
-            splatUrl: null,
-            gaussianCount: null,
-            status: 'idle',
-            progressText: null,
-            progressStep: null,
-            errorMessage: null,
-            computeBackend: null,
-            targetPlyType: null,
-            currentTrainingIteration: null,
-            maxTrainingIterations: null,
-            activeTaskId: null,
-          };
-        }
-
-        const hasNewData = Object.entries(nextUpdates).some(
-          ([key, value]) => !areWorkflowValuesEqual(n.data[key], value)
-        );
-        if (!hasNewData) return n;
-        return { ...n, data: { ...n.data, ...nextUpdates } };
-      })
-    );
-  }, [nodes, edges, workflowRunning, setNodes]);
-
-  /* ---- Auto-stop workflow when all terminal workflow nodes are done ---- */
-  useEffect(() => {
-    if (!workflowRunning) return;
-
-    const terminalNodes = getTerminalWorkflowNodes(nodes, edges);
-    if (terminalNodes.length === 0) return;
-
-    const allTerminalNodesDone = terminalNodes.every((node) => isNodeDone(node));
-    if (allTerminalNodesDone) {
-      setWorkflowRunning(false);
-    }
-  }, [nodes, edges, workflowRunning]);
 
   /* ---- Drag & Drop ---- */
   const onDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
@@ -585,48 +453,20 @@ function FlowEditorInner() {
 
   /* ---- Handlers ---- */
   const handleRun = useCallback(() => {
-    const compiled = compileWorkflowGraph(nodes, edges);
-    if (!compiled.ok) {
-      setWorkflowRunning(false);
-      setRunError(compiled.diagnostics[0]?.message ?? 'Workflow graph is invalid');
-      return;
-    }
-    setRunError(null);
-    setWorkflowRunning(false);
-    void apiFetch('/api/cancel-workflow-tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    })
-      .catch(() => {})
-      .finally(() => {
-        setWorkflowRunning(true);
-      });
-  }, [apiFetch, edges, nodes]);
+    workflowRunner.run();
+  }, [workflowRunner]);
 
   const handleStop = useCallback(() => {
-    setRunError(null);
-    setWorkflowRunning(false);
-    void apiFetch('/api/cancel-workflow-tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }).catch(() => {});
-  }, [apiFetch]);
+    workflowRunner.stop();
+  }, [workflowRunner]);
 
   const handleClear = useCallback(() => {
-    setRunError(null);
-    setWorkflowRunning(false);
-    void apiFetch('/api/cancel-workflow-tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }).catch(() => {});
+    workflowRunner.stop();
     const cleared = buildClearedWorkflowGraph(nodes, edges, getClearedNodeData);
     setNodes(cleared.nodes);
     setEdges(cleared.edges);
     setCanvasRevision((value) => value + 1);
-  }, [apiFetch, edges, nodes, setEdges, setNodes]);
+  }, [edges, nodes, setEdges, setNodes, workflowRunner]);
 
   /* ---- Save / Load Workflow ---- */
   const handleSaveWorkflow = useCallback(async () => {
@@ -678,20 +518,14 @@ function FlowEditorInner() {
 
   const handleLoadWorkflow = useCallback(
     (entry: { nodes: unknown[]; edges: unknown[] }) => {
-      setWorkflowRunning(false);
-      setRunError(null);
+      workflowRunner.stop();
       const migrated = migrateSavedWorkflow(entry);
       setNodes(migrated.nodes);
       setEdges(migrated.edges.map((edge) => normalizeWorkflowEdge(edge, migrated.nodes)));
       setTimeout(() => fitView({ padding: 0.2 }), 100);
     },
-    [setNodes, setEdges, fitView, setWorkflowRunning],
+    [setNodes, setEdges, fitView, workflowRunner],
   );
-
-  /* ---- Compute workflow progress for TopBar ---- */
-  const pipelineNodes = getConnectedWorkflowNodes(nodes, edges);
-  const workflowProgress = pipelineNodes.filter((n) => isNodeDone(n)).length;
-  const workflowTotal = pipelineNodes.length;
 
   if (ephemeralSessionId === null) {
     return (
@@ -703,7 +537,13 @@ function FlowEditorInner() {
 
   return (
     <WorkflowContext.Provider
-      value={{ workflowRunning, setWorkflowRunning, ephemeralSessionId, apiFetch }}
+      value={{
+        workflowRunning: false,
+        setWorkflowRunning: () => {},
+        runSingleNode: workflowRunner.runSingleNode,
+        ephemeralSessionId,
+        apiFetch,
+      }}
     >
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-zinc-950">
         {/* Top Bar */}
@@ -712,9 +552,9 @@ function FlowEditorInner() {
           onStop={handleStop}
           onClear={handleClear}
           onSaveWorkflow={handleSaveWorkflow}
-          workflowRunning={workflowRunning}
-          progress={{ done: workflowProgress, total: workflowTotal }}
-          runError={runError}
+          workflowRunning={workflowRunner.workflowRunning}
+          progress={workflowRunner.progress}
+          runError={workflowRunner.error}
         />
 
         <div className="relative flex-1 overflow-hidden">
