@@ -1,0 +1,89 @@
+Splat to Sculpt 项目运行说明
+==========================
+
+GitHub 地址：
+https://github.com/yydesign7/Splat-to-Sculpt.git
+
+
+一、只打开项目网页
+----------------
+
+需要先安装：
+
+1. Node.js 20 或更高版本
+2. pnpm 9 或更高版本
+
+推荐命令：
+
+git clone https://github.com/yydesign7/Splat-to-Sculpt.git
+cd Splat-to-Sculpt
+
+corepack enable
+corepack prepare pnpm@9 --activate
+
+pnpm install
+pnpm dev
+
+启动后，在浏览器中打开：
+
+http://localhost:5001
+
+
+二、如果要完整运行 3D / 点云工作流
+-------------------------------
+
+除了 Node.js 和 pnpm，还需要 Python 依赖：
+
+python3 -m pip install -Ur scripts/requirements-python.txt
+
+macOS 推荐安装系统工具：
+
+brew install ffmpeg colmap
+
+Blender 需要单独安装到 Applications：
+
+/Applications/Blender.app
+
+启动前建议显式指定 Python：
+
+export PYTHON_BIN=$(which python3)
+pnpm dev
+
+
+三、如果要使用 Nerfstudio True Training
+-------------------------------------
+
+需要额外安装 Nerfstudio，并设置：
+
+export NS_TRAIN_BIN=$(which ns-train)
+export NS_EXPORT_BIN=$(which ns-export)
+
+然后再启动：
+
+pnpm dev
+
+
+四、最常用的完整命令版本
+----------------------
+
+git clone https://github.com/yydesign7/Splat-to-Sculpt.git
+cd Splat-to-Sculpt
+corepack enable
+corepack prepare pnpm@9 --activate
+pnpm install
+python3 -m pip install -Ur scripts/requirements-python.txt
+export PYTHON_BIN=$(which python3)
+pnpm dev
+
+浏览器打开：
+
+http://localhost:5001
+
+
+注意事项
+--------
+
+1. 项目必须使用 pnpm，不要使用 npm install 或 yarn。
+2. 只打开网页时，不一定需要 Blender、COLMAP、Nerfstudio。
+3. 如果要运行视频帧提取、点云生成、GLB 转换、模型清理、表面处理、视频预览等功能，需要 Python 依赖和对应系统工具。
+4. 运行时生成的视频、帧图片、PLY、GLB、贴图和临时文件都保存在本地，不需要提交到 GitHub。
