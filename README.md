@@ -23,6 +23,8 @@ Video Upload
 
 Users can also drag assets from the sidebar into compatible nodes, save custom workflows, stop long-running tasks, clear previews, and reuse generated models or videos from the Assets panel.
 
+Workflow execution is centralized in `src/lib/workflow/`: a typed node registry defines ports, readiness, completion, data transfer, reset behavior, and node executors; a graph compiler validates saved or edited DAGs; and a run-scoped scheduler/runner owns start order, propagation, cancellation, stale-result protection, and automatic completion. React node components now stay focused on upload controls, previews, local editing UI, and asset publication side effects.
+
 ## Main Features
 
 - Node-based visual workflow editor with clickable, removable connections.
@@ -186,8 +188,9 @@ src/
 ├── app/                 # Next.js App Router pages and API routes
 ├── components/flow/     # Workflow canvas, node UI, viewers, and sidebar
 ├── components/ui/       # shadcn/ui base components
-├── lib/                 # Workflow logic, task stores, publishing helpers
-└── hooks/               # Shared React hooks
+├── hooks/               # Shared React hooks, including the React workflow-runner adapter
+├── lib/                 # Workflow registry/runner, task stores, publishing helpers
+│   └── workflow/        # Typed contracts, registry, compiler, scheduler, executors
 
 scripts/
 ├── setup-macos.sh

@@ -36,11 +36,11 @@ Splat to Sculpt 是一个基于节点式画布的 3D 内容生成工作流应用
 │   │   │   ├── PLYViewer.tsx      # Three.js PLY / 点云预览器
 │   │   │   └── SplatViewer.tsx    # Gaussian Splat / PLY 预览器
 │   │   └── ui/             # Shadcn UI 组件库
-│   ├── hooks/              # 自定义 Hooks
+│   ├── hooks/              # 自定义 Hooks（含 use-workflow-runner React 适配层）
 │   ├── lib/
-│   │   ├── node-config.ts  # 节点类型配置与常量
+│   │   ├── node-config.ts  # 节点展示配置与常量（由 workflow registry 派生）
 │   │   ├── utils.ts        # 通用工具函数 (cn)
-│   │   ├── workflow-engine.ts  # 工作流引擎（端口映射、触发条件、统一数据推送、拓扑排序）
+│   │   ├── workflow/       # 工作流契约、节点注册表、图编译器、运行状态、调度器和 executors
 │   │   └── workflow-context.ts # 工作流运行状态 React Context
 │   └── server.ts           # 自定义服务端入口
 ├── next.config.ts
@@ -54,50 +54,24 @@ Splat to Sculpt 是一个基于节点式画布的 3D 内容生成工作流应用
 
 工作流采用"点击运行 → 自动编排"模式：
 
-1. **运行状态管理**：通过 `WorkflowContext` 提供 `workflowRunning`、`ephemeralSessionId` 和统一 `apiFetch`
-2. **统一数据推送**：`FlowEditor` 中的 `useEffect` 监听节点完成状态，节点完成后通过 `computeDownstreamPushes()` 只向已连接的下游节点推送数据
-3. **自动停止**：`FlowEditor` 会检测当前连通工作流的末端节点；末端节点全部完成后自动把 `workflowRunning` 设为 `false`
-4. **停止/清空**：Stop 会调用取消接口终止 Gaussian Splat 等长时间后端任务；Clear 会清空上传文件、输出文件和节点状态，但保留节点布局与连线
-5. **节点触发条件**：
+1. **中心注册表**：`src/lib/workflow/node-registry.ts` 是唯一节点契约来源，统一定义端口、默认数据、触发条件、完成条件、数据包读写、重置逻辑和 executor。
+2. **图编译与迁移**：`graph-compiler.ts` 校验 DAG、端口兼容、重复输入、环和 dangling edges；`migrations.ts` 把旧保存工作流升级到当前 schema，并清理已删除节点/字段。
+3. **运行状态管理**：`createWorkflowRunner()` 以 runId 为边界调度节点，统一处理启动顺序、进度 patch、输出传播、过期结果保护、取消和自动完成；`use-workflow-runner.ts` 只是 React Flow 适配层。
+4. **交互节点暂停**：Surface Processing 是 `interactive` 节点；默认工作流运行到该节点会进入 `waiting-for-user`，用户点击 Apply 时通过 `runSingleNode(id)` 继续后续自动节点。
+5. **停止/清空**：Stop 由 runner abort 所有当前节点 controller，并调用取消接口终止 Gaussian Splat 等长时间后端任务；Clear 会先 Stop，再清空上传文件、输出文件和节点状态，但保留节点布局与连线。
+6. **节点触发条件**：
    - **Video Upload**：用户手动上传视频，上传完成后输出 `videoServerPath`，同时保存目标帧数
-   - **Frame Extraction**：`workflowRunning && videoServerPath` → 自动提取帧，输出 `frames`
+   - **Frame Extraction**：registry readiness 满足 `videoServerPath` 后由 runner 自动提取帧，输出 `frames`
    - **Gaussian Splat Gen**：接收 `frames` 或手动/上游 PLY；根据输入和设备走 True training 或 Fast Initializer。True training 输出 `splatUrl`，Fast Initializer/直接 PLY 输出 `sourcePlyUrl`，节点会让已有下游连线跟随当前模式切换输出句柄
-   - **Mesh Gen**：`workflowRunning && modelUrl` → 接收 splat/PLY/OBJ/GLB，转换或处理为下游可用的 GLB/OBJ/PLY；PLY/splat 重建后执行 `geometry_graph_surface` mesh face 分层，最多输出 8 个几何层
-   - **Model Cleanup**：`workflowRunning && modelUrl && 有上游连接` → 自动调用 Blender 清理/整理模型
-   - **Surface Processing**：`workflowRunning && modelUrl && 有上游连接` → 接收模型后可调材质/灯光并自动或手动调用 Blender 材质处理
-   - **ComfyUI Video Gen**：`workflowRunning && modelUrl && 有上游连接` → 把模型复制到自动检测到的本机 ComfyUI `input/3d`，提交内置 API workflow，轮询任务并下载输出视频
+   - **Mesh Gen**：registry readiness 满足 `modelUrl` 后由 runner 自动接收 splat/PLY/OBJ/GLB，转换或处理为下游可用的 GLB/OBJ/PLY；PLY/splat 重建后执行 `geometry_graph_surface` mesh face 分层，最多输出 8 个几何层
+   - **Model Cleanup**：registry readiness 满足 `modelUrl` 且有上游连接后，由 runner 自动调用 Blender 清理/整理模型
+   - **Surface Processing**：接收模型后可调材质/灯光；用户点击 Apply 触发 `runSingleNode(id)`，成功后把 `lightParams` 与层信息传到下游
+   - **ComfyUI Video Gen**：registry readiness 满足 `modelUrl` 且有上游连接后，由 runner 把模型复制到自动检测到的本机 ComfyUI `input/3d`，提交内置 API workflow，轮询任务并下载输出视频
    - **Video Preview**：默认接收 ComfyUI 的 `videoUrl` 并直接播放；接收模型输入时仍可调用旋转视频 API 生成 360° 预览视频
 
-### 端口映射
+### 节点注册表端口契约
 
-```ts
-// Source handles → output data field
-SOURCE_HANDLE_MAP = {
-  'videoUpload.output': 'videoServerPath',
-  'frameExtraction.output': 'frames',
-  'gaussianSplat.mesh-output': 'sourcePlyUrl',
-  'gaussianSplat.splat-output': 'splatUrl',
-  'modelOrganize.obj-output': 'outputUrl',
-  'modelSurface.obj-output': 'outputModelUrl',
-  'modelGeneration.output': 'outputUrl',
-  'comfyVideo.video-output': 'videoUrl',
-}
-
-// Target handles → input data update function
-TARGET_HANDLE_MAP = {
-  'frameExtraction.input': (value, sourceNodeType, sourceNodeData) => {
-    return { videoServerPath: value, targetFrameCount: sourceNodeData?.targetFrameCount };
-  },
-  'gaussianSplat.input': (value) => ({ framePaths: value }),
-  'gaussianSplat.ply-input': (value) => ({ sourcePlyUrl: value }),
-  'modelGeneration.model-input': (value, sourceNodeType, sourceNodeData) => { infer inputType as splat/ply/obj/glb; forward gaussianCount/computeBackend/lightParams/layer metadata; return result; },
-  'modelOrganize.obj-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward layerNames/layerGlbUrls; return result; },
-  'modelSurface.obj-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward layerNames/layerGlbUrls; return result; },
-  'videoPreview.obj-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward lightParams; return result; },
-  'videoPreview.video-input': (value) => ({ videoUrl: value }),
-  'comfyVideo.model-input': (value, _sourceNodeType, sourceNodeData) => { result = { modelUrl: value }; forward lightParams; return result; },
-}
-```
+端口映射不再通过单独的 `SOURCE_HANDLE_MAP` / `TARGET_HANDLE_MAP` 维护。每个节点的 `readOutput()` 和 `applyInput()` 都定义在 `WORKFLOW_NODE_REGISTRY` 中，runner 只通过这些契约传递 `WorkflowPacket`。新增或修改节点时必须同步更新 registry、compiler/runner 相关测试和默认 workflow 测试。
 
 ### 节点系统
 节点库提供 9 种节点类型；Default Workflow 使用 8 个处理/输出节点和 3 个 Sticky Note：
@@ -203,7 +177,8 @@ Gaussian Splat / PLY source
 - Mesh Gen 源端口 id 为 `output`，目标端口 id 为 `model-input`
 
 ### 工作流开发规范
-- 节点自动触发使用 `useWorkflow()` 获取 `workflowRunning` 状态
-- 自动触发 `useEffect` 依赖 `workflowRunning` + 必要输入字段 + 当前 status
-- 数据推送同时由节点内 `useEffect` 和 `FlowEditor` 统一推送机制处理（双重保障）
-- 新增节点类型需在 `workflow-engine.ts` 的 `SOURCE_HANDLE_MAP`、`TARGET_HANDLE_MAP` 和 `getNodeTriggerInfo` 中注册
+- 节点执行、端口、默认数据、触发条件和完成条件必须先注册到 `src/lib/workflow/node-registry.ts`
+- 节点 API 调用和轮询逻辑放在 `src/lib/workflow/executors/`；React 节点组件不要各自实现工作流执行旁路
+- Run / Stop / Clear 由 `createWorkflowRunner()` 和 `useWorkflowRunner()` 管理；节点按钮通过 `runSingleNode(id)` 触发单节点执行
+- 数据传递只能通过 registry 的 `readOutput()` / `applyInput()` 和 runner 传播，避免在组件里手写下游节点更新
+- 新增节点类型需补齐 registry 测试、graph compiler 测试、runner/默认工作流回归测试，并确保迁移逻辑不会恢复已删除 legacy 字段

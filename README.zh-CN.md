@@ -23,6 +23,8 @@ Video Upload
 
 用户也可以从侧边栏把 Assets 拖入兼容节点，保存自定义工作流，停止长时间任务，清空预览，并复用 Assets 面板中的模型和视频。
 
+工作流执行已集中在 `src/lib/workflow/`：类型化节点注册表统一定义端口、触发条件、完成条件、数据传递、重置规则和节点 executor；图编译器负责校验保存或编辑后的 DAG；run-scoped scheduler / runner 统一负责启动顺序、数据传播、取消、过期结果保护和自动完成。React 节点组件只保留上传控件、预览、局部编辑 UI 和资产发布等展示/交互职责。
+
 ## 主要功能
 
 - 基于节点的可视化工作流编辑器，支持点击选中和删除连线。
@@ -186,8 +188,9 @@ src/
 ├── app/                 # Next.js App Router 页面与 API 路由
 ├── components/flow/     # 工作流画布、节点 UI、预览器和侧边栏
 ├── components/ui/       # shadcn/ui 基础组件
-├── lib/                 # 工作流逻辑、任务状态和发布辅助函数
-└── hooks/               # 共享 React hooks
+├── hooks/               # 共享 React hooks，包括 React workflow-runner 适配层
+├── lib/                 # 工作流注册表/runner、任务状态和发布辅助函数
+│   └── workflow/        # 类型契约、注册表、图编译器、调度器和 executors
 
 scripts/
 ├── setup-macos.sh
